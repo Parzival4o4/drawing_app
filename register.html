@@ -80,7 +80,7 @@
 <body>
     <div class="register-container">
         <h1>Register</h1>
-        <form method="POST" action="/register" onsubmit="return validateForm()">
+    <form id="registerForm" onsubmit="return submitForm(event)">
             <div class="error" id="errorMsg">Please enter both email and password.</div>
 
             <label for="email">Email:</label>
@@ -98,18 +98,49 @@
     </div>
 
     <script>
-        function validateForm() {
+        async function submitForm(event) {
+            event.preventDefault();
+
             const email = document.getElementById('email').value.trim();
             const password = document.getElementById('password').value.trim();
             const errorMsg = document.getElementById('errorMsg');
 
             if (!email || !password) {
-                errorMsg.style.display = 'block';
+                errorMsg.textContent = "Please enter both email and password.";
+                errorMsg.style.display = "block";
                 return false;
             }
 
-            errorMsg.style.display = 'none';
-            return true;
+            const formData = new URLSearchParams();
+            formData.append("email", email);
+            formData.append("password", password);
+
+            const response = await fetch("/register", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                body: formData.toString(),
+            });
+
+            if (response.ok) {
+                window.location.href = "/";
+            } else {
+                let message = "Registration failed.";
+                try {
+                    const errorData = await response.json();
+                    if (errorData.error) {
+                        message = errorData.error;
+                    }
+                } catch (_) {
+                    message = await response.text();
+                }
+
+                errorMsg.textContent = message;
+                errorMsg.style.display = "block";
+            }
+
+            return false;
         }
     </script>
 </body>

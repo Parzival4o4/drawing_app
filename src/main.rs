@@ -29,7 +29,7 @@ use axum::{
     extract::FromRequestParts,
     http::{request::Parts, StatusCode, header, HeaderMap, HeaderValue},
     response::{Html, IntoResponse, Response, Redirect},
-    routing::{get, post},
+    routing::{get, post, get_service},
     Form, Json, Router,
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
@@ -41,6 +41,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::fs;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
+
+
 
 // ───── 1. Constants / statics ──────────────
 static KEYS: LazyLock<Keys> = LazyLock::new(|| {
@@ -69,7 +71,10 @@ async fn main() {
         .route("/login", get(login_page))
         .route("/login", post(login))
         .route("/register", get(register_page))
-        .route("/register", post(register)); 
+        .route("/register", post(register))
+        .route("/logout", post(logout));
+
+
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -80,82 +85,84 @@ async fn main() {
 
 // ───── 3. Handlers ─────────────────────────
 
-async fn login(Form(payload): Form<AuthPayload>) -> impl IntoResponse {
-    match authorize(Json(payload)).await {
-        Ok(Json(body)) => {
-            // Set the JWT as an HTTP-only cookie
-            let cookie = format!(
-                "auth_token={}; HttpOnly; Path=/",
-                body.access_token
-            );
 
-            let mut headers = HeaderMap::new();
-            headers.insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+async fn logout() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
 
-            // Redirect to home
-            (headers, Redirect::to("/")).into_response()
-        }
-        Err(err) => err.into_response(),
-    }
+    // Set auth_token cookie with an expired date
+    headers.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_static("auth_token=; HttpOnly; Path=/; Max-Age=0"),
+    );
+
+    (headers, Redirect::to("/login")).into_response()
 }
 
 
+async fn login(Form(payload): Form<AuthPayload>) -> impl IntoResponse {
+    match authorize_user(&payload).await {
+        Ok(token) => jwt_response(token),
+        Err(err) => err.into_response(),
+    }
+}
 
 async fn register(Form(payload): Form<AuthPayload>) -> impl IntoResponse {
     if payload.email.is_empty() || payload.password.is_empty() {
         return AuthError::MissingCredentials.into_response();
     }
 
-    // create the user in the "DB"
     {
         let mut users = USERS.write().await;
 
         if users.contains_key(&payload.email) {
-            return AuthError::WrongCredentials.into_response(); // Or use a clearer error type
+            return AuthError::UserExists.into_response();
         }
 
         users.insert(payload.email.clone(), payload.password.clone());
     }
 
-    // Call `authorize()` to generate JWT and redirect
-    authorize(Json(payload)).await
-        .map(|Json(body)| {
-            let cookie = format!(
-                "auth_token={}; HttpOnly; Path=/",
-                body.access_token
-            );
-            let mut headers = HeaderMap::new();
-            headers.insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
-            (headers, Redirect::to("/")).into_response()
-        })
-        .unwrap_or_else(|e| e.into_response())
+    match authorize_user(&payload).await {
+        Ok(token) => jwt_response(token),
+        Err(err) => err.into_response(),
+    }
 }
 
 
-async fn authorize(Json(payload): Json<AuthPayload>) -> Result<Json<AuthBody>, AuthError> {
+// Core authorization logic (shared by login + register)
+async fn authorize_user(payload: &AuthPayload) -> Result<String, AuthError> {
     if payload.email.is_empty() || payload.password.is_empty() {
         return Err(AuthError::MissingCredentials);
     }
 
     let users = USERS.read().await;
-
     match users.get(&payload.email) {
         Some(stored_password) if stored_password == &payload.password => {
             let claims = Claims {
-                sub: payload.email.clone(),
-                company: "ACME".to_owned(),
-                exp: 2000000000,
+                email: payload.email.clone(),
+                exp: 2_000_000_000,
             };
 
             let token = encode(&Header::default(), &claims, &KEYS.encoding)
                 .map_err(|_| AuthError::TokenCreation)?;
 
-            Ok(Json(AuthBody::new(token)))
+            // Log user and token
+            tracing::info!("Authorized user: {}, JWT: {}", payload.email, token);
+
+            Ok(token)
         }
         _ => Err(AuthError::WrongCredentials),
     }
 }
 
+// Shared cookie + redirect response builder
+fn jwt_response(token: String) -> Response {
+    let cookie = format!("auth_token={}; HttpOnly; Path=/", token);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+
+    (headers, Redirect::to("/")).into_response()
+}
 
 async fn login_page() -> impl IntoResponse {
     match fs::read_to_string("login.html") {
@@ -184,8 +191,7 @@ async fn home(_claims: Claims) -> impl IntoResponse {
 // ───── 4. Types and their impls ────────────
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    sub: String,
-    company: String,
+    email: String,
     exp: usize,
 }
 
@@ -229,7 +235,7 @@ where
 
 impl Display for Claims {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Email: {}\nCompany: {}", self.sub, self.company)
+        write!(f, "Email: {}", self.email)
     }
 }
 
@@ -247,20 +253,20 @@ impl Keys {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct AuthBody {
-    access_token: String,
-    token_type: String,
-}
+// #[derive(Debug, Serialize)]
+// struct AuthBody {
+//     access_token: String,
+//     token_type: String,
+// }
 
-impl AuthBody {
-    fn new(access_token: String) -> Self {
-        Self {
-            access_token,
-            token_type: "Bearer".to_string(),
-        }
-    }
-}
+// impl AuthBody {
+//     fn new(access_token: String) -> Self {
+//         Self {
+//             access_token,
+//             token_type: "Bearer".to_string(),
+//         }
+//     }
+// }
 
 #[derive(Debug, Deserialize)]
 struct AuthPayload {
@@ -272,21 +278,23 @@ struct AuthPayload {
 enum AuthError {
     WrongCredentials,
     MissingCredentials,
+    UserExists,           // new error variant
     TokenCreation,
-    InvalidToken,
 }
+
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
             AuthError::WrongCredentials => (StatusCode::UNAUTHORIZED, "Wrong credentials"),
             AuthError::MissingCredentials => (StatusCode::BAD_REQUEST, "Missing credentials"),
+            AuthError::UserExists => (StatusCode::CONFLICT, "User already exists"), 
             AuthError::TokenCreation => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Token creation error")
             }
-            AuthError::InvalidToken => (StatusCode::BAD_REQUEST, "Invalid token"),
         };
         let body = Json(json!({ "error": error_message }));
         (status, body).into_response()
     }
 }
+

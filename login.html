@@ -75,8 +75,8 @@
 <body>
     <div class="login-container">
         <h1>Login</h1>
-        <form method="POST" action="/login" onsubmit="return validateForm()">
-            <div class="error" id="errorMsg">Please enter both email and password.</div>
+        <form id="loginForm" onsubmit="loginUser(event)">
+            <div class="error" id="errorMsg">Invalid email or password.</div>
 
             <label for="email">Email:</label>
             <input type="email" id="email" name="email" required>
@@ -93,19 +93,41 @@
     </div>
 
     <script>
-        function validateForm() {
+        async function loginUser(event) {
+            event.preventDefault();
+
             const email = document.getElementById('email').value.trim();
             const password = document.getElementById('password').value.trim();
             const errorMsg = document.getElementById('errorMsg');
 
             if (!email || !password) {
+                errorMsg.textContent = "Please enter both email and password.";
                 errorMsg.style.display = 'block';
-                return false;
+                return;
             }
 
-            errorMsg.style.display = 'none';
-            return true;
+            const formData = new URLSearchParams();
+            formData.append('email', email);
+            formData.append('password', password);
+
+            const response = await fetch('/login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: formData
+            });
+
+            if (response.ok) {
+                // Login success – redirect to home
+                window.location.href = '/';
+            } else {
+                // Login failed – show error
+                errorMsg.textContent = "Invalid email or password.";
+                errorMsg.style.display = 'block';
+            }
         }
     </script>
+
 </body>
 </html>
