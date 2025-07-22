@@ -39,11 +39,18 @@ use std::fmt::Display;
 use std::sync::LazyLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::fs;
+use std::collections::HashMap;
+use tokio::sync::RwLock;
 
 // ───── 1. Constants / statics ──────────────
 static KEYS: LazyLock<Keys> = LazyLock::new(|| {
     let secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
     Keys::new(secret.as_bytes())
+});
+
+// DB placeholder 
+static USERS: LazyLock<RwLock<HashMap<String, String>>> = LazyLock::new(|| {
+    RwLock::new(HashMap::new())
 });
 
 // ───── 2. Main entrypoint ──────────────────
@@ -60,7 +67,9 @@ async fn main() {
     let app = Router::new()
         .route("/", get(home))
         .route("/login", get(login_page))
-        .route("/login", post(login)); 
+        .route("/login", post(login))
+        .route("/register", get(register_page))
+        .route("/register", post(register)); 
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -91,10 +100,75 @@ async fn login(Form(payload): Form<AuthPayload>) -> impl IntoResponse {
 }
 
 
+
+async fn register(Form(payload): Form<AuthPayload>) -> impl IntoResponse {
+    if payload.email.is_empty() || payload.password.is_empty() {
+        return AuthError::MissingCredentials.into_response();
+    }
+
+    // create the user in the "DB"
+    {
+        let mut users = USERS.write().await;
+
+        if users.contains_key(&payload.email) {
+            return AuthError::WrongCredentials.into_response(); // Or use a clearer error type
+        }
+
+        users.insert(payload.email.clone(), payload.password.clone());
+    }
+
+    // Call `authorize()` to generate JWT and redirect
+    authorize(Json(payload)).await
+        .map(|Json(body)| {
+            let cookie = format!(
+                "auth_token={}; HttpOnly; Path=/",
+                body.access_token
+            );
+            let mut headers = HeaderMap::new();
+            headers.insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
+            (headers, Redirect::to("/")).into_response()
+        })
+        .unwrap_or_else(|e| e.into_response())
+}
+
+
+async fn authorize(Json(payload): Json<AuthPayload>) -> Result<Json<AuthBody>, AuthError> {
+    if payload.email.is_empty() || payload.password.is_empty() {
+        return Err(AuthError::MissingCredentials);
+    }
+
+    let users = USERS.read().await;
+
+    match users.get(&payload.email) {
+        Some(stored_password) if stored_password == &payload.password => {
+            let claims = Claims {
+                sub: payload.email.clone(),
+                company: "ACME".to_owned(),
+                exp: 2000000000,
+            };
+
+            let token = encode(&Header::default(), &claims, &KEYS.encoding)
+                .map_err(|_| AuthError::TokenCreation)?;
+
+            Ok(Json(AuthBody::new(token)))
+        }
+        _ => Err(AuthError::WrongCredentials),
+    }
+}
+
+
 async fn login_page() -> impl IntoResponse {
     match fs::read_to_string("login.html") {
         Ok(contents) => Html(contents).into_response(),
         Err(_) => Html("<h1>Login page not found</h1>").into_response(),
+    }
+}
+
+async fn register_page() -> impl IntoResponse {
+    match fs:: read_to_string("register.html") {
+        Ok(contents) => Html(contents).into_response(),
+        Err(_) => Html("<h1>Register page not found</h1>").into_response(),
+
     }
 }
 
@@ -105,23 +179,7 @@ async fn home(_claims: Claims) -> impl IntoResponse {
     }
 }
 
-async fn authorize(Json(payload): Json<AuthPayload>) -> Result<Json<AuthBody>, AuthError> {
-    if payload.email.is_empty() || payload.password.is_empty() {
-        return Err(AuthError::MissingCredentials);
-    }
-    if payload.email!= "b@b.com" || payload.password != "pwd" {
-        return Err(AuthError::WrongCredentials);
-    }
-    let claims = Claims {
-        sub: "b@b.com".to_owned(),
-        company: "ACME".to_owned(),
-        exp: 2000000000,
-    };
-    let token = encode(&Header::default(), &claims, &KEYS.encoding)
-        .map_err(|_| AuthError::TokenCreation)?;
 
-    Ok(Json(AuthBody::new(token)))
-}
 
 // ───── 4. Types and their impls ────────────
 #[derive(Debug, Serialize, Deserialize)]
