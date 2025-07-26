@@ -1,4 +1,5 @@
 //! Parts of this code have been adapted from https://github.com/tokio-rs/axum/blob/main/examples/jwt/src/main.rs
+//! ChatGPT and Google Gemini where used (interestingly Gemini is significantly better at rust than ChatGPT)
 //! Example JWT authorization/authentication.
 //!
 //! Run with
@@ -24,17 +25,18 @@
 // curl -s -w '\n' -H 'Content-Type: application/json' -H 'Authorization: Bearer blahblahblah' http://localhost:3000/protected
 
 //TODOs
-// - look fallback behind auth
 // - event text field
+// - integrate type script src files into the project
+// - docker 
 
 
 use axum::{
-   extract::FromRequestParts, http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode}, response::{Html, IntoResponse, Redirect, Response}, routing::{any, get, post}, Form, Json, Router
+   extract::{FromRequestParts}, http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode}, middleware::{self, Next}, response::{Html, IntoResponse, Redirect, Response}, routing::{any, get, post}, Form, Json, Router
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tower_http::services::{ServeDir};
+use tower_http::{services::ServeDir};
 use std::fmt::Display;
 use std::sync::LazyLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -67,21 +69,23 @@ async fn main() {
         .init();
 
 
+    // The protected service: ServeDir with its own 404 handler
+    let protected_static_files_service = ServeDir::new("./drawer")
+        .not_found_service(any(handle_404)); // This service correctly handles GET/HEAD for files and 404s
+
+
     let app = Router::new()
+        // The `fallback_service` now takes the protected static files directly.
+        .fallback_service(protected_static_files_service) // <--- Use the service directly here
+        // Apply the authentication middleware to ALL routes *above* this point
+        // that are not explicitly defined above. This includes the fallback.
+        .layer(middleware::from_fn(auth_middleware)) // <--- Apply middleware here!
+
         .route("/login", get(login_page))
         .route("/login", post(login))
         .route("/register", get(register_page))
         .route("/register", post(register))
-        .route("/logout", post(logout))
-        .fallback_service(
-            ServeDir::new("./drawer")
-                // For `not_found_service`, we can directly provide an Axum handler function
-                // or use `axum::routing::get` (or `any`) to create a service from it.
-                // In this case, since we want it to always return 404 regardless of the method,
-                // we can use `axum::routing::any()`.
-                .not_found_service(any(handle_404)) // Or `any(handle_404)`
-        );
-
+        .route("/logout", post(logout));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -89,6 +93,30 @@ async fn main() {
     tracing::debug!("listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
 }
+
+
+
+// This middleware runs *before* the inner service (ServeDir in this case)
+async fn auth_middleware(
+    claims_result: Result<Claims, Redirect>, // Attempt to extract Claims
+    request: axum::http::Request<axum::body::Body>, // The incoming request
+    next: Next, // The next service in the stack (ServeDir)
+) -> Response {
+    match claims_result {
+        Ok(claims) => {
+            // User is authenticated, proceed to the next service (ServeDir)
+            tracing::debug!("Authenticated user: {:?} accessing {:?}", claims.email, request.uri());
+            next.run(request).await
+        }
+        Err(redirect) => {
+            // User is not authenticated, redirect to login page
+            tracing::debug!("Unauthenticated request for {:?}, redirecting to /login", request.uri());
+            redirect.into_response()
+        }
+    }
+}
+
+
 
 // Custom handler for 404 errors
 async fn handle_404() -> Response {
