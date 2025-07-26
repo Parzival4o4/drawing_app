@@ -23,18 +23,23 @@
 //
 // curl -s -w '\n' -H 'Content-Type: application/json' -H 'Authorization: Bearer blahblahblah' http://localhost:3000/protected
 
+//TODOs
+// - look fallback behind auth
+// - event text field
+// - 404 error 
 
 
 use axum::{
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode, header, HeaderMap, HeaderValue},
-    response::{Html, IntoResponse, Response, Redirect},
-    routing::{get, post, get_service},
+    http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post},
     Form, Json, Router,
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tower_http::services::{ServeDir, ServeFile};
 use std::fmt::Display;
 use std::sync::LazyLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -67,14 +72,14 @@ async fn main() {
         .init();
 
     let app = Router::new()
-        .route("/", get(home))
         .route("/login", get(login_page))
         .route("/login", post(login))
         .route("/register", get(register_page))
         .route("/register", post(register))
-        .route("/logout", post(logout));
-
-
+        .route("/logout", post(logout))
+        .fallback_service(
+            ServeDir::new("./drawer").fallback(ServeFile::new("home.html"))
+        );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
@@ -84,6 +89,7 @@ async fn main() {
 }
 
 // ───── 3. Handlers ─────────────────────────
+
 
 
 async fn logout() -> impl IntoResponse {
@@ -180,7 +186,7 @@ async fn register_page() -> impl IntoResponse {
 }
 
 async fn home(_claims: Claims) -> impl IntoResponse {
-    match fs::read_to_string("home.html") {
+    match fs::read_to_string("drawer/index.html") {
         Ok(contents) => Html(contents).into_response(),
         Err(_) => Html("<h1>Home page not found</h1>").into_response(),
     }
