@@ -26,20 +26,15 @@
 //TODOs
 // - look fallback behind auth
 // - event text field
-// - 404 error 
 
 
 use axum::{
-    extract::FromRequestParts,
-    http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
-    routing::{get, post},
-    Form, Json, Router,
+   extract::FromRequestParts, http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode}, response::{Html, IntoResponse, Redirect, Response}, routing::{any, get, post}, Form, Json, Router
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::{ServeDir};
 use std::fmt::Display;
 use std::sync::LazyLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -71,6 +66,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+
     let app = Router::new()
         .route("/login", get(login_page))
         .route("/login", post(login))
@@ -78,14 +74,25 @@ async fn main() {
         .route("/register", post(register))
         .route("/logout", post(logout))
         .fallback_service(
-            ServeDir::new("./drawer").fallback(ServeFile::new("home.html"))
+            ServeDir::new("./drawer")
+                // For `not_found_service`, we can directly provide an Axum handler function
+                // or use `axum::routing::get` (or `any`) to create a service from it.
+                // In this case, since we want it to always return 404 regardless of the method,
+                // we can use `axum::routing::any()`.
+                .not_found_service(any(handle_404)) // Or `any(handle_404)`
         );
+
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
         .unwrap();
     tracing::debug!("listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
+}
+
+// Custom handler for 404 errors
+async fn handle_404() -> Response {
+    (StatusCode::NOT_FOUND, "404 Not Found").into_response()
 }
 
 // ───── 3. Handlers ─────────────────────────
@@ -184,15 +191,6 @@ async fn register_page() -> impl IntoResponse {
 
     }
 }
-
-async fn home(_claims: Claims) -> impl IntoResponse {
-    match fs::read_to_string("drawer/index.html") {
-        Ok(contents) => Html(contents).into_response(),
-        Err(_) => Html("<h1>Home page not found</h1>").into_response(),
-    }
-}
-
-
 
 // ───── 4. Types and their impls ────────────
 #[derive(Debug, Serialize, Deserialize)]
