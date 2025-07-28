@@ -37,7 +37,7 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::{services::ServeDir};
-use std::fmt::Display;
+use std::{env, fmt::Display, net::SocketAddr};
 use std::sync::LazyLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::fs;
@@ -70,7 +70,7 @@ async fn main() {
 
 
     // The protected service: ServeDir with its own 404 handler
-    let protected_static_files_service = ServeDir::new("./drawer")
+    let protected_static_files_service = ServeDir::new("./public")
         .not_found_service(any(handle_404)); // This service correctly handles GET/HEAD for files and 404s
 
 
@@ -87,7 +87,16 @@ async fn main() {
         .route("/register", post(register))
         .route("/logout", post(logout));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+
+    // Determine the binding address based on an environment variable
+    let host = env::var("SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = env::var("SERVER_PORT").unwrap_or_else(|_| "3000".to_string());
+
+    let addr_str = format!("{}:{}", host, port);
+    let addr: SocketAddr = addr_str.parse().expect("Invalid SERVER_HOST:SERVER_PORT provided");
+
+    // Use the dynamically determined address for binding
+    let listener = tokio::net::TcpListener::bind(addr) // Use the 'addr' variable here
         .await
         .unwrap();
     tracing::debug!("listening on {}", listener.local_addr().unwrap());

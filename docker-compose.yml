@@ -1,0 +1,24 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: . # Build from the current directory (where Dockerfile is)
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000" # Map host port 3000 to container port 3000
+    environment:
+      SERVER_HOST: "0.0.0.0" # For Docker, bind to all interfaces
+      SERVER_PORT: "3000"    # Explicitly set port, though default is 3000
+      # Pass your JWT_SECRET here for local development.
+      # For production, consider using Docker Secrets or similar.
+      JWT_SECRET: "dummy_secret"
+
+    # Optional: If you want to bind-mount for development (less common with multi-stage builds for simplicity)
+    # volumes:
+    #   - ./src:/app/src # Mount Rust source for dev (requires recompilation in container)
+    #   - ./frontend/src:/app/frontend/src # Mount TS source for dev (requires recompilation)
+    #   - ./public:/app/public # Mount public for dev (requires build step outside container)
+    # If using volumes, you'd typically remove the COPY commands for those directories in the Dockerfile
+    # and run the build steps on the host. But for a clean production build, the current Dockerfile is better.
