@@ -15,7 +15,7 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation}
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::{services::ServeDir};
-use std::{env, fmt::Display, net::SocketAddr};
+use std::{env, net::SocketAddr};
 use std::sync::LazyLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::fs;
@@ -92,11 +92,15 @@ async fn main() {
 
 
     let app = Router::new()
+        .route("/api/user-info", get(get_user_info)) // Add this line
+        // Define routes that require authentication before the middleware
+        // This makes sure these specific routes are protected.
+        .route("/profile", post(update_profile))
         // The `fallback_service` now takes the protected static files directly.
-        .fallback_service(protected_static_files_service) // <--- Use the service directly here
+        .fallback_service(protected_static_files_service)
         // Apply the authentication middleware to ALL routes *above* this point
         // that are not explicitly defined above. This includes the fallback.
-        .layer(middleware::from_fn(auth_middleware)) // <--- Apply middleware here!
+        .layer(middleware::from_fn(auth_middleware))
 
         .route("/login", get(login_page))
         .route("/login", post(login))
@@ -125,27 +129,26 @@ async fn main() {
 
 
 
-// This middleware runs *before* the inner service (ServeDir in this case)
 async fn auth_middleware(
-    claims_result: Result<Claims, Redirect>, // Attempt to extract Claims
-    request: axum::http::Request<axum::body::Body>, // The incoming request
-    next: Next, // The next service in the stack (ServeDir)
+    claims_result: Result<Claims, Redirect>,
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
 ) -> Response {
     match claims_result {
         Ok(claims) => {
-            // User is authenticated, proceed to the next service (ServeDir)
-            tracing::debug!("Authenticated user: {:?} accessing {:?}", claims.email, request.uri());
+            tracing::debug!("Authenticated user: {} (ID: {}) accessing {:?}", claims.email, claims.user_id, request.uri());
+            // --- ADD THIS LINE ---
+            let mut request = request;
+            request.extensions_mut().insert(claims); // Store the Claims in extensions
+            // --- END ADDITION ---
             next.run(request).await
         }
         Err(redirect) => {
-            // User is not authenticated, redirect to login page
             tracing::debug!("Unauthenticated request for {:?}, redirecting to /login", request.uri());
             redirect.into_response()
         }
     }
 }
-
-
 
 // Custom handler for 404 errors
 async fn handle_404() -> Response {
@@ -153,6 +156,135 @@ async fn handle_404() -> Response {
 }
 
 // ───── 3. Handlers ─────────────────────────
+
+async fn get_user_info(
+    claims: Claims, // The Claims extractor will get this from the request extensions
+) -> impl IntoResponse {
+    // You already have the claims thanks to the auth_middleware and FromRequestParts for Claims!
+    Json(json!({
+        "user_id": claims.user_id,
+        "email": claims.email,
+        "display_name": claims.display_name,
+    }))
+}
+
+// Update User Profile
+async fn update_profile(
+    State(pool): State<SqlitePool>,
+    claims: Claims, // Extracted by auth_middleware and FromRequestParts
+    Form(payload): Form<UpdateUserPayload>, // New payload for updates
+) -> impl IntoResponse {
+    // Check if there's anything to update
+    if payload.email.is_none() && payload.display_name.is_none() {
+        tracing::debug!("No fields provided for profile update for user {}", claims.user_id);
+        return (StatusCode::NO_CONTENT, Json(json!({"message": "No fields to update"}))).into_response();
+    }
+
+    let mut tx = match pool.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to begin transaction for profile update: {:?}", e);
+            return AuthError::DbError.into_response();
+        }
+    };
+
+    let mut updated_email = claims.email.clone();
+    let mut updated_display_name = claims.display_name.clone();
+
+    // Handle email update if provided
+    if let Some(new_email) = payload.email {
+        if new_email.is_empty() {
+             tx.rollback().await.ok();
+             return (StatusCode::BAD_REQUEST, Json(json!({"error": "Email cannot be empty."}))).into_response();
+        }
+        // Check if the new email already exists for another user
+        match query!("SELECT user_id FROM users WHERE email = ? AND user_id != ?", new_email, claims.user_id)
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            Ok(Some(_)) => {
+                tx.rollback().await.ok();
+                tracing::warn!("Profile update failed: Email '{}' already taken by another user.", new_email);
+                return AuthError::UserExists.into_response(); // Email already taken
+            }
+            Ok(None) => {
+                // Email is unique, proceed with update
+                match query!("UPDATE users SET email = ? WHERE user_id = ?", new_email, claims.user_id)
+                    .execute(&mut *tx)
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!("User {} (ID: {}) updated email to '{}'.", claims.email, claims.user_id, new_email);
+                        updated_email = new_email; // Update for new JWT
+                    }
+                    Err(e) => {
+                        tx.rollback().await.ok();
+                        tracing::error!("Failed to update email for user {}: {:?}", claims.user_id, e);
+                        return AuthError::DbError.into_response();
+                    }
+                }
+            }
+            Err(e) => {
+                tx.rollback().await.ok();
+                tracing::error!("DB error checking email uniqueness for user {}: {:?}", claims.user_id, e);
+                return AuthError::DbError.into_response();
+            }
+        }
+    }
+
+    // Handle display_name update if provided
+    if let Some(new_display_name) = payload.display_name {
+        if new_display_name.is_empty() {
+            tx.rollback().await.ok();
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "Display name cannot be empty."}))).into_response();
+        }
+        match query!("UPDATE users SET display_name = ? WHERE user_id = ?", new_display_name, claims.user_id)
+            .execute(&mut *tx)
+            .await
+        {
+            Ok(_) => {
+                tracing::info!("User {} (ID: {}) updated display name to '{}'.", claims.email, claims.user_id, new_display_name);
+                updated_display_name = new_display_name; // Update for new JWT
+            }
+            Err(e) => {
+                tx.rollback().await.ok();
+                tracing::error!("Failed to update display name for user {}: {:?}", claims.user_id, e);
+                return AuthError::DbError.into_response();
+            }
+        }
+    }
+
+    // Commit the transaction
+    match tx.commit().await {
+        Ok(_) => tracing::debug!("Transaction committed for user {}", claims.user_id),
+        Err(e) => {
+            tracing::error!("Failed to commit transaction for user {}: {:?}", claims.user_id, e);
+            return AuthError::DbError.into_response();
+        }
+    }
+
+    // Issue a new JWT with updated claims
+    let new_claims = Claims {
+        user_id: claims.user_id,
+        email: updated_email,
+        display_name: updated_display_name,
+        exp: 2_000_000_000, // Re-use the expiration, or calculate new based on current time
+    };
+
+    let new_token = match encode(&Header::default(), &new_claims, &KEYS.encoding) {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::error!("Failed to create new token after profile update: {:?}", e);
+            return AuthError::TokenCreation.into_response();
+        }
+    };
+
+    // Return the new JWT as a cookie
+    jwt_response(new_token)
+}
+
+
+
 
 async fn logout() -> impl IntoResponse {
     let mut headers = HeaderMap::new();
@@ -169,7 +301,7 @@ async fn logout() -> impl IntoResponse {
 
 async fn login(
     State(pool): State<SqlitePool>, // Get the database pool from state
-    Form(payload): Form<AuthPayload>
+    Form(payload): Form<LoginPayload> // <-- CHANGED: Use LoginPayload here
 ) -> impl IntoResponse {
     match authorize_user(&pool, &payload).await { // Pass pool to authorize_user
         Ok(token) => jwt_response(token),
@@ -181,7 +313,9 @@ async fn register(
     State(pool): State<SqlitePool>, // Get the database pool from state
     Form(payload): Form<AuthPayload>
 ) -> impl IntoResponse {
-    if payload.email.is_empty() || payload.password.is_empty() {
+
+    // Ensure all required fields are present, including display_name
+    if payload.email.is_empty() || payload.password.is_empty() || payload.display_name.is_empty() {
         return AuthError::MissingCredentials.into_response();
     }
 
@@ -191,11 +325,12 @@ async fn register(
         Err(_) => return AuthError::PasswordHashingFailed.into_response(), // <--- Handle error explicitly
     };
 
-    // Insert user into the database
+    // Insert user into the database, including display_name
     match query!(
-        "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+        "INSERT INTO users (email, password_hash, display_name) VALUES (?, ?, ?)",
         payload.email,
-        password_hash
+        password_hash,
+        payload.display_name // <-- Add display_name here
     )
     .execute(&pool)
     .await
@@ -221,23 +356,31 @@ async fn register(
 
 
 // Core authorization logic (shared by login + register)
-async fn authorize_user(
-    pool: &SqlitePool, // Accept the database pool
-    payload: &AuthPayload
-) -> Result<String, AuthError> {
-    if payload.email.is_empty() || payload.password.is_empty() {
+// This function needs to be generic enough to accept both AuthPayload (from register)
+// and LoginPayload (from login). We'll achieve this by making it generic over `T`
+// and adding a trait bound.
+async fn authorize_user<T>(
+    pool: &SqlitePool,
+    payload: &T // <-- CHANGED: Generic over T
+) -> Result<String, AuthError>
+where
+    T: AuthCommon + Send + Sync + 'static, // <-- NEW: Trait bound for common fields
+{
+    if payload.email().is_empty() || payload.password().is_empty() { // <-- CHANGED: Use methods
         return Err(AuthError::MissingCredentials);
     }
 
-    // Query the database for the user
-    let user_row: Option<SqliteRow> = query("SELECT id, email, password_hash FROM users WHERE email = ?")
-        .bind(&payload.email)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database query error during authorization: {:?}", e);
-            AuthError::DbError
-        })?;
+    // Query the database for the user, selecting user_id and display_name
+    let user_row: Option<SqliteRow> = query(
+        "SELECT user_id, email, password_hash, display_name FROM users WHERE email = ?"
+    )
+    .bind(payload.email()) // <-- CHANGED: Use method
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database query error during authorization: {:?}", e);
+        AuthError::DbError
+    })?;
 
     match user_row {
         Some(row) => {
@@ -248,28 +391,43 @@ async fn authorize_user(
                 })?;
 
             // Verify the password
-            if verify_password(&payload.password, &stored_password_hash).map_err(|_| AuthError::WrongCredentials)? {
+            if verify_password(payload.password(), &stored_password_hash).map_err(|_| AuthError::WrongCredentials)? { // <-- CHANGED: Use method
+                // Extract user_id and display_name for JWT claims
+                let user_id: i64 = row.try_get("user_id")
+                    .map_err(|e| {
+                        tracing::error!("Failed to get user_id from row: {:?}", e);
+                        AuthError::DbError
+                    })?;
+                let display_name: String = row.try_get("display_name")
+                    .map_err(|e| {
+                        tracing::error!("Failed to get display_name from row: {:?}", e);
+                        AuthError::DbError
+                    })?;
+
                 let claims = Claims {
-                    email: payload.email.clone(),
+                    user_id,
+                    email: payload.email().to_string(), // <-- CHANGED: Use method and clone
+                    display_name,
                     exp: 2_000_000_000, // JWT expiration timestamp
                 };
 
                 let token = encode(&Header::default(), &claims, &KEYS.encoding)
                     .map_err(|_| AuthError::TokenCreation)?;
 
-                tracing::info!("Authorized user: {}", payload.email);
+                tracing::info!("Authorized user: {} (ID: {})", claims.email, claims.user_id);
                 Ok(token)
             } else {
-                tracing::warn!("Authorization failed: Wrong password for user {}", payload.email);
+                tracing::warn!("Authorization failed: Wrong password for user {}", payload.email()); // <-- CHANGED: Use method
                 Err(AuthError::WrongCredentials)
             }
         }
         None => {
-            tracing::warn!("Authorization failed: User {} not found.", payload.email);
+            tracing::warn!("Authorization failed: User {} not found.", payload.email()); // <-- CHANGED: Use method
             Err(AuthError::WrongCredentials) // User not found
         }
     }
 }
+
 
 // Password Hashing Helper
 fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
@@ -289,7 +447,6 @@ fn verify_password(password: &str, hashed_password: &str) -> Result<bool, argon2
 // Shared cookie + redirect response builder
 fn jwt_response(token: String) -> Response {
     let cookie = format!("auth_token={}; HttpOnly; Path=/; Max-Age={}", token, 60 * 60 * 24 * 7);
-
 
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
@@ -318,11 +475,14 @@ async fn register_page() -> impl IntoResponse {
 }
 
 // ───── 4. Types and their impls ────────────
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Claims {
+    user_id: i64,
     email: String,
+    display_name: String,
     exp: usize,
 }
+
 
 
 impl<S> FromRequestParts<S> for Claims
@@ -332,6 +492,12 @@ where
     type Rejection = Redirect;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+
+        // Attempt to get claims from request extensions first (if already authenticated by middleware)
+        if let Some(claims) = parts.extensions.get::<Claims>() {
+            return Ok(claims.clone());
+        }
+
         let cookies = parts
             .headers
             .get(header::COOKIE)
@@ -362,12 +528,6 @@ where
 }
 
 
-impl Display for Claims {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Email: {}", self.email)
-    }
-}
-
 struct Keys {
     encoding: EncodingKey,
     decoding: DecodingKey,
@@ -386,7 +546,40 @@ impl Keys {
 struct AuthPayload {
     email: String,
     password: String,
+    display_name: String,
 }
+
+
+// LoginPayload for Login (only needs email and password)
+#[derive(Debug, Deserialize)]
+struct LoginPayload {
+    email: String,
+    password: String,
+}
+
+// For user profile updates (optional fields)
+#[derive(Debug, Deserialize)]
+struct UpdateUserPayload {
+    email: Option<String>,
+    display_name: Option<String>,
+}
+
+// Trait to abstract common fields for authorize_user
+trait AuthCommon {
+    fn email(&self) -> &str;
+    fn password(&self) -> &str;
+}
+
+impl AuthCommon for AuthPayload {
+    fn email(&self) -> &str { &self.email }
+    fn password(&self) -> &str { &self.password }
+}
+
+impl AuthCommon for LoginPayload {
+    fn email(&self) -> &str { &self.email }
+    fn password(&self) -> &str { &self.password }
+}
+
 
 #[derive(Debug)]
 enum AuthError {
@@ -394,8 +587,8 @@ enum AuthError {
     MissingCredentials,
     UserExists,
     TokenCreation,
-    PasswordHashingFailed, // New error variant for hashing issues
-    DbError,               // Generic database error
+    PasswordHashingFailed,
+    DbError,              
 }
 
 

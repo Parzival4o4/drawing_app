@@ -33,7 +33,8 @@
         }
 
         input[type="email"],
-        input[type="password"] {
+        input[type="password"],
+        input[type="text"] { /* Added input type text to styling */
             width: 100%;
             padding: 0.5rem;
             margin-bottom: 1rem;
@@ -80,14 +81,17 @@
 <body>
     <div class="register-container">
         <h1>Register</h1>
-    <form id="registerForm" onsubmit="return submitForm(event)">
-            <div class="error" id="errorMsg">Please enter both email and password.</div>
+        <form id="registerForm" onsubmit="return submitForm(event)">
+            <div class="error" id="errorMsg"></div>
 
             <label for="email">Email:</label>
-            <input type="email" id="email" name="email" required>
+            <input type="email" id="email" name="email" required oninput="populateDisplayName()">
 
             <label for="password">Password:</label>
             <input type="password" id="password" name="password" required>
+
+            <label for="display_name">Display Name:</label>
+            <input type="text" id="display_name" name="display_name" required>
 
             <input type="submit" value="Register">
         </form>
@@ -98,15 +102,37 @@
     </div>
 
     <script>
+        // Function to auto-populate display name
+        function populateDisplayName() {
+            const emailInput = document.getElementById('email');
+            const displayNameInput = document.getElementById('display_name');
+            const emailValue = emailInput.value;
+
+            // Extract the part before '@'
+            const atIndex = emailValue.indexOf('@');
+            if (atIndex > 0) {
+                let username = emailValue.substring(0, atIndex);
+                // Simple capitalization for a nicer display name
+                if (username.length > 0) {
+                    username = username.charAt(0).toUpperCase() + username.slice(1);
+                }
+                displayNameInput.value = username;
+            } else {
+                // Clear or set to empty if no '@' or if the email is invalid/incomplete
+                displayNameInput.value = '';
+            }
+        }
+
         async function submitForm(event) {
             event.preventDefault();
 
             const email = document.getElementById('email').value.trim();
             const password = document.getElementById('password').value.trim();
+            const displayName = document.getElementById('display_name').value.trim(); // Get display name
             const errorMsg = document.getElementById('errorMsg');
 
-            if (!email || !password) {
-                errorMsg.textContent = "Please enter both email and password.";
+            if (!email || !password || !displayName) { // Validate display name too
+                errorMsg.textContent = "Please enter email, password, and display name.";
                 errorMsg.style.display = "block";
                 return false;
             }
@@ -114,6 +140,7 @@
             const formData = new URLSearchParams();
             formData.append("email", email);
             formData.append("password", password);
+            formData.append("display_name", displayName); // Append display_name
 
             const response = await fetch("/register", {
                 method: "POST",

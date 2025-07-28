@@ -1,11 +1,140 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <title>Zeichenprogramm</title>
-  <link rel="stylesheet" href="style.css" />
+    <meta charset="UTF-8">
+    <title>Zeichenprogramm</title>
+    <link rel="stylesheet" href="style.css" />
 
-  <style>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f4f4f4;
+            color: #333;
+        }
+
+        .header-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .user-info {
+            background-color: #e9e9e9;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .user-info p {
+            margin: 0 0 5px 0;
+            font-size: 0.95em;
+        }
+
+        .profile-edit-form {
+            background-color: #ffffff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-top: 15px;
+            max-width: 400px; /* Limit width for better readability */
+        }
+
+        .profile-edit-form label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        .profile-edit-form input[type="email"],
+        .profile-edit-form input[type="text"] {
+            width: calc(100% - 20px);
+            padding: 8px 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box; /* Include padding in width */
+        }
+
+        .profile-edit-form button {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        .profile-edit-form button[type="submit"] {
+            background-color: #007bff;
+            color: white;
+        }
+
+        .profile-edit-form button[type="submit"]:hover {
+            background-color: #0056b3;
+        }
+
+        .profile-edit-form .cancel-btn {
+            background-color: #6c757d;
+            color: white;
+            margin-left: 10px;
+        }
+
+        .profile-edit-form .cancel-btn:hover {
+            background-color: #5a6268;
+        }
+
+        .logout-btn, .edit-profile-btn {
+            padding: 0.5rem 1rem;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-left: 10px; /* Spacing between buttons */
+        }
+
+        .logout-btn {
+            background-color: #dc3545;
+            color: white;
+        }
+
+        .logout-btn:hover {
+            background-color: #b02a37;
+        }
+
+        .edit-profile-btn {
+            background-color: #28a745;
+            color: white;
+        }
+
+        .edit-profile-btn:hover {
+            background-color: #218838;
+        }
+
+        .message {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+
+        .message.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .message.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        /* Your existing styles (from prompt) */
+        /* You can move these to style.css if you prefer */
+        /*
         .logout-btn {
             margin-top: 1.5rem;
             padding: 0.5rem 1rem;
@@ -20,14 +149,37 @@
         .logout-btn:hover {
             background-color: #b02a37;
         }
-  </style>
+        */
+    </style>
 
-  <script type="module" src="drawer.js"></script>
+    <script type="module" src="drawer.js"></script>
 </head>
 <body>
-    <form method="POST" action="/logout">
-        <button type="submit" class="logout-btn">Logout</button>
-    </form>
+    <div class="header-container">
+        <div class="user-info">
+            <p>Welcome, <strong id="userDisplayName">Loading...</strong>!</p>
+            <p>Email: <strong id="userEmail">Loading...</strong></p>
+            <button id="editProfileBtn" class="edit-profile-btn">Edit Profile</button>
+        </div>
+        <form method="POST" action="/logout">
+            <button type="submit" class="logout-btn">Logout</button>
+        </form>
+    </div>
+
+    <div id="profileEditSection" class="profile-edit-form" style="display: none;">
+        <h3>Update Profile</h3>
+        <form id="updateProfileForm">
+            <label for="newEmail">New Email:</label>
+            <input type="email" id="newEmail" name="email" placeholder="Leave blank to keep current">
+
+            <label for="newDisplayName">New Display Name:</label>
+            <input type="text" id="newDisplayName" name="display_name" placeholder="Leave blank to keep current">
+
+            <button type="submit">Save Changes</button>
+            <button type="button" id="cancelEditBtn" class="cancel-btn">Cancel</button>
+        </form>
+        <div id="updateMessage" class="message" style="display: none;"></div>
+    </div>
 
     <p>
     Haben Sie eines ausgewählt, können Sie mit der Maus
@@ -40,6 +192,114 @@
     <canvas id="drawArea" width="1024" height="768"></canvas>
     <textarea id="textarea" cols="130" rows="20" name = "event_log"></textarea>
     <button id="button" type="button">Laden</button>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            const userDisplayNameElem = document.getElementById('userDisplayName');
+            const userEmailElem = document.getElementById('userEmail');
+            const editProfileBtn = document.getElementById('editProfileBtn');
+            const profileEditSection = document.getElementById('profileEditSection');
+            const updateProfileForm = document.getElementById('updateProfileForm');
+            const cancelEditBtn = document.getElementById('cancelEditBtn');
+            const newEmailInput = document.getElementById('newEmail');
+            const newDisplayNameInput = document.getElementById('newDisplayName');
+            const updateMessage = document.getElementById('updateMessage');
+
+            // Function to fetch and display user info
+            async function fetchAndDisplayUserInfo() {
+                try {
+                    const response = await fetch('/api/user-info'); // Request user info from backend
+                    if (response.ok) {
+                        const userInfo = await response.json();
+                        userDisplayNameElem.textContent = userInfo.display_name || 'Guest';
+                        userEmailElem.textContent = userInfo.email || 'N/A';
+                    } else if (response.status === 302) { // Redirect status, handled by browser usually
+                        // User not authenticated, browser will handle redirect, or you can
+                        // manually redirect if necessary based on your middleware
+                        console.log("Not authenticated, redirecting to login...");
+                    } else {
+                        console.error('Failed to fetch user info:', response.status);
+                        userDisplayNameElem.textContent = 'Error Loading';
+                        userEmailElem.textContent = 'Error Loading';
+                    }
+                } catch (error) {
+                    console.error('Network error fetching user info:', error);
+                    userDisplayNameElem.textContent = 'Network Error';
+                    userEmailElem.textContent = 'Network Error';
+                }
+            }
+
+            // Initial load: Fetch and display user info
+            fetchAndDisplayUserInfo();
+
+            // Toggle profile edit form visibility
+            editProfileBtn.addEventListener('click', () => {
+                profileEditSection.style.display = 'block';
+                // Pre-fill with current values for convenience
+                // Use the currently displayed values, or refetch from /api/user-info if you want to be super fresh
+                newEmailInput.value = userEmailElem.textContent === 'N/A' || userEmailElem.textContent === 'Not Logged In' || userEmailElem.textContent === 'Error Loading' || userEmailElem.textContent === 'Network Error' ? '' : userEmailElem.textContent;
+                newDisplayNameInput.value = userDisplayNameElem.textContent === 'Guest' || userDisplayNameElem.textContent === 'Not Logged In' || userDisplayNameElem.textContent === 'Error Loading' || userDisplayNameElem.textContent === 'Network Error' ? '' : userDisplayNameElem.textContent;
+                updateMessage.style.display = 'none'; // Hide previous messages
+            });
+
+            cancelEditBtn.addEventListener('click', () => {
+                profileEditSection.style.display = 'none';
+                updateMessage.style.display = 'none'; // Hide message when closing
+            });
+
+            // Handle profile update form submission
+            updateProfileForm.addEventListener('submit', async (event) => {
+                event.preventDefault(); // Prevent default form submission
+
+                const formData = new FormData(updateProfileForm);
+                const data = {};
+                // Only include fields that have a value
+                if (formData.get('email') && formData.get('email').trim() !== '') {
+                    data.email = formData.get('email').trim();
+                }
+                if (formData.get('display_name') && formData.get('display_name').trim() !== '') {
+                    data.display_name = formData.get('display_name').trim();
+                }
+
+                // If no fields are provided for update
+                if (Object.keys(data).length === 0) {
+                    displayMessage('No changes to save.', 'error');
+                    return;
+                }
+
+                // Convert data to URL-encoded form data
+                const formBody = Object.keys(data).map(key => encodeURIComponent(key) + '=' + encodeURIComponent(data[key])).join('&');
+
+                try {
+                    const response = await fetch('/profile', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            // The `auth_token` cookie will be sent automatically by the browser
+                        },
+                        body: formBody
+                    });
+
+                    if (response.ok) {
+                        await fetchAndDisplayUserInfo(); // Re-fetch user info after successful update
+                        displayMessage('Profile updated successfully!', 'success');
+                        profileEditSection.style.display = 'none'; // Hide form on success
+                    } else {
+                        const errorData = await response.json();
+                        displayMessage(`Error: ${errorData.error || 'Failed to update profile.'}`, 'error');
+                    }
+                } catch (error) {
+                    console.error('Network error:', error);
+                    displayMessage('Network error. Please try again.', 'error');
+                }
+            });
+
+            function displayMessage(message, type) {
+                updateMessage.textContent = message;
+                updateMessage.className = `message ${type}`;
+                updateMessage.style.display = 'block';
+            }
+        });
+    </script>
 </body>
 </html>
-
