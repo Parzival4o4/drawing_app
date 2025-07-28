@@ -15,3 +15,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-cookies = "0.9"
 tower = { version = "0.5.2", features = ["util"] }
 tower-http = { version = "0.6.1", features = ["fs", "trace"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "macros", "time"] }
+dotenvy = "0.15"
+
+argon2 = "0.5" # For password hashing
+rand_core = { version = "0.6", features = ["std"] } # Dependency for argon2, ensures random salt generation

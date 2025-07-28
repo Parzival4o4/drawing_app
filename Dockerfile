@@ -7,65 +7,74 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 
 # Install frontend dependencies
-# 'ci' is better for CI/CD, ensures clean install
 RUN npm ci --prefer-offline 
 
 # Copy frontend source code and static assets
 COPY frontend/src ./src
 COPY frontend/public ./public
 COPY frontend/tsconfig.json ./
-# Copy the helper script
 COPY frontend/copy-static.js ./ 
 
-# Build the frontend (tsc compiles, then copy-static.js moves files)
+# Build the frontend
 RUN npm run build
 
 # --- STAGE 2: Build Rust Backend ---
-FROM rust:alpine AS rust-builder
+# IMPORTANT CHANGE: Use rust:latest (Debian-based) for easier compilation
+FROM rust:bookworm AS rust-builder
 
 WORKDIR /app
 
-# Install musl-dev for static compilation (important for alpine base)
-RUN apk add --no-cache musl-dev
+# Install sqlx-cli
+RUN cargo install sqlx-cli --features sqlite 
 
-# Copy Cargo.toml and Cargo.lock first to leverage Docker cache for dependencies
+# Create DB dir and point to an absolute path for build-time DB
+RUN mkdir -p /app/data
+RUN touch /app/data/sqlx_build_cache.db
+ENV DATABASE_URL="sqlite:///app/data/sqlx_build_cache.db"
+
 COPY Cargo.toml Cargo.lock ./
-
-# Copy your actual Rust source code
 COPY src ./src
-# Copy your HTML templates if they are read by Rust
 COPY login.html register.html home.html ./
+COPY migrations ./migrations
+
+# Verification and migration steps
+# Note: For sqlite, a real file needs to exist for sqlx-cli to work sometimes.
+RUN echo "PWD: $(pwd)" && \
+    echo "DATABASE_URL=$DATABASE_URL" && \
+    ls -lah /app/data && \
+    sqlx migrate run
 
 # Build the final Rust binary
 RUN cargo build --release
 
-# --- STAGE 3: Final Production Image ---
-FROM alpine:latest AS final
+# IMPORTANT: Use a Debian-based slim image to match glibc from the build stage.
+FROM debian:bookworm-slim AS final
 
-# Set default user and group for security (optional but good practice)
-# RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-# USER appuser
+# If your Rust application connects to remote databases via TLS/SSL,
+# you'll need the runtime OpenSSL libraries. ca-certificates are also often needed.
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    # libssl3 # Uncomment this if your Rust app uses TLS for remote connections (e.g., Postgres, MySQL)
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Copy the compiled Rust binary from the rust-builder stage
-# Replace 'web_server_axum' with your binary name
 COPY --from=rust-builder /app/target/release/web_server_axum ./web_server_axum
 
 # Copy the built frontend assets from the frontend-builder stage
-# This correctly points to /app/public after frontend build
-COPY --from=frontend-builder /app/frontend/../public ./public
+COPY --from=frontend-builder /app/public ./public
 
-# Copy your HTML templates if they are part of the served content, and not frontend assets
-# This is redundant if already in public/, but if you read them from Rust, they need to be here.
-COPY login.html register.html home.html ./
+# Copy your HTML templates if they are read from Rust (and not served by ServeDir from public/)
+# Ensure `home.html` is included here if your app serves it directly.
+COPY login.html register.html ./
 
-# Set environment variables for the application (e.g., JWT secret)
-# !!! IMPORTANT: Replace with a strong secret or pass at runtime
+# Set environment variables for the application at runtime
 ENV JWT_SECRET="your_secure_jwt_secret_here"
 
 # Expose the port your Axum server listens on
-EXPOSE 3000
+EXPOSE 8080
 
-# Command to run your application
+# Remove the RUN command that tries to execute the binary during the build.
+# This is where your application starts when the container actually runs.
 CMD ["./web_server_axum"]

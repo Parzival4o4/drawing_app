@@ -1,5 +1,4 @@
 # docker-compose.yml
-version: '3.8'
 
 services:
   web:
@@ -7,13 +6,16 @@ services:
       context: . # Build from the current directory (where Dockerfile is)
       dockerfile: Dockerfile
     ports:
-      - "3000:3000" # Map host port 3000 to container port 3000
+      - "8080:8080" # Map host port 8080 to container port 8080
     environment:
       SERVER_HOST: "0.0.0.0" # For Docker, bind to all interfaces
-      SERVER_PORT: "3000"    # Explicitly set port, though default is 3000
+      SERVER_PORT: "8080"    # Explicitly set port, though default is 8080
       # Pass your JWT_SECRET here for local development.
       # For production, consider using Docker Secrets or similar.
       JWT_SECRET: "dummy_secret"
+      DATABASE_URL: "sqlite:///app/data/db.sqlite" # Path inside the container
+    volumes:
+      - ./data:/app/data # Mount a host directory for database persistence
 
     # Optional: If you want to bind-mount for development (less common with multi-stage builds for simplicity)
     # volumes:

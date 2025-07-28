@@ -8,30 +8,8 @@
 //! JWT_SECRET=secret cargo run -p example-jwt
 //! ```
 
-
-// Quick instructions
-//
-// - get an authorization token:
-//
-// curl -s -w '\n' -H 'Content-Type: application/json' -d '{"client_id":"foo","client_secret":"bar"}' http://localhost:3000/authorize 
-//
-// - visit the protected area using the authorized token
-//
-// curl -s -w '\n' -H 'Content-Type: application/json' -H 'Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJiQGIuY29tIiwiY29tcGFueSI6IkFDTUUiLCJleHAiOjEwMDAwMDAwMDAwfQ.M3LAZmrzUkXDC1q5mSzFAs_kJrwuKz3jOoDmjJ0G4gM' http://localhost:3000/protected
-// curl -s -w '\n' -H 'Content-Type: application/json' -H 'Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJiQGIuY29tIiwiY29tcGFueSI6IkFDTUUiLCJleHAiOjIwMDAwMDAwMDB9.KhqUwuS0eDsS3kU69CQWxHujLYfGuXljFDkuVmYAVTQ' http://localhost:3000/protected
-//
-// - try to visit the protected area using an invalid token
-//
-// curl -s -w '\n' -H 'Content-Type: application/json' -H 'Authorization: Bearer blahblahblah' http://localhost:3000/protected
-
-//TODOs
-// - event text field
-// - integrate type script src files into the project
-// - docker 
-
-
 use axum::{
-   extract::{FromRequestParts}, http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode}, middleware::{self, Next}, response::{Html, IntoResponse, Redirect, Response}, routing::{any, get, post}, Form, Json, Router
+   extract::{FromRequestParts, State}, http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode}, middleware::{self, Next}, response::{Html, IntoResponse, Redirect, Response}, routing::{any, get, post}, Form, Json, Router
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -41,9 +19,18 @@ use std::{env, fmt::Display, net::SocketAddr};
 use std::sync::LazyLock;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use std::fs;
-use std::collections::HashMap;
-use tokio::sync::RwLock;
 
+// SQLX imports
+use sqlx::sqlite::{SqlitePool, SqliteRow}; // Specific pool for SQLite
+use sqlx::{Error as SqlxError, Row, query}; // Common sqlx traits/macros
+use sqlx::migrate::Migrator; // For database migrations
+use dotenvy::dotenv; // For loading .env files
+
+// Password hashing imports
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+    Argon2, PasswordHash, PasswordVerifier,
+};
 
 
 // ───── 1. Constants / statics ──────────────
@@ -52,10 +39,8 @@ static KEYS: LazyLock<Keys> = LazyLock::new(|| {
     Keys::new(secret.as_bytes())
 });
 
-// DB placeholder 
-static USERS: LazyLock<RwLock<HashMap<String, String>>> = LazyLock::new(|| {
-    RwLock::new(HashMap::new())
-});
+// Static Migrator instance (ensure your `migrations` directory exists at project root)
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 // ───── 2. Main entrypoint ──────────────────
 #[tokio::main]
@@ -68,6 +53,38 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // --- data base ---
+
+    // Load .env file for local development (won't affect Docker, which uses env vars directly)
+    dotenv().ok();
+    tracing::info!("Environment variables loaded."); // Add this
+    let database_url = env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set in .env or environment variables");
+    tracing::info!("DATABASE_URL: {}", database_url); // Add this to see what path is being used
+
+    if database_url.starts_with("sqlite://") {
+        let db_path_str = database_url.trim_start_matches("sqlite://");
+        let db_path = std::path::Path::new(db_path_str);
+        if let Some(parent_dir) = db_path.parent() {
+            if !parent_dir.exists() {
+                tracing::info!("Creating database directory: {:?}", parent_dir);
+                std::fs::create_dir_all(parent_dir)
+                    .expect("Failed to create database directory.");
+            }
+        }
+    }
+
+    tracing::info!("Connecting to database at: {}", database_url);
+    let pool = SqlitePool::connect(&database_url)
+        .await
+        .expect("Failed to create SQLite pool. Check DATABASE_URL and database file permissions.");
+
+
+    tracing::info!("Running database migrations...");
+    MIGRATOR.run(&pool).await.expect("Failed to run database migrations.");
+    tracing::info!("Database migrations applied successfully.");
+
+    // --- routing ---
 
     // The protected service: ServeDir with its own 404 handler
     let protected_static_files_service = ServeDir::new("./public")
@@ -85,12 +102,15 @@ async fn main() {
         .route("/login", post(login))
         .route("/register", get(register_page))
         .route("/register", post(register))
-        .route("/logout", post(logout));
+        .route("/logout", post(logout))
+        .with_state(pool.clone());
 
+
+    // --- network stuff --- 
 
     // Determine the binding address based on an environment variable
     let host = env::var("SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = env::var("SERVER_PORT").unwrap_or_else(|_| "3000".to_string());
+    let port = env::var("SERVER_PORT").unwrap_or_else(|_| "8080".to_string());
 
     let addr_str = format!("{}:{}", host, port);
     let addr: SocketAddr = addr_str.parse().expect("Invalid SERVER_HOST:SERVER_PORT provided");
@@ -134,8 +154,6 @@ async fn handle_404() -> Response {
 
 // ───── 3. Handlers ─────────────────────────
 
-
-
 async fn logout() -> impl IntoResponse {
     let mut headers = HeaderMap::new();
 
@@ -149,64 +167,129 @@ async fn logout() -> impl IntoResponse {
 }
 
 
-async fn login(Form(payload): Form<AuthPayload>) -> impl IntoResponse {
-    match authorize_user(&payload).await {
+async fn login(
+    State(pool): State<SqlitePool>, // Get the database pool from state
+    Form(payload): Form<AuthPayload>
+) -> impl IntoResponse {
+    match authorize_user(&pool, &payload).await { // Pass pool to authorize_user
         Ok(token) => jwt_response(token),
         Err(err) => err.into_response(),
     }
 }
 
-async fn register(Form(payload): Form<AuthPayload>) -> impl IntoResponse {
+async fn register(
+    State(pool): State<SqlitePool>, // Get the database pool from state
+    Form(payload): Form<AuthPayload>
+) -> impl IntoResponse {
     if payload.email.is_empty() || payload.password.is_empty() {
         return AuthError::MissingCredentials.into_response();
     }
 
+    // Hash the password
+    let password_hash = match hash_password(&payload.password) {
+        Ok(hash) => hash,
+        Err(_) => return AuthError::PasswordHashingFailed.into_response(), // <--- Handle error explicitly
+    };
+
+    // Insert user into the database
+    match query!(
+        "INSERT INTO users (email, password_hash) VALUES (?, ?)",
+        payload.email,
+        password_hash
+    )
+    .execute(&pool)
+    .await
     {
-        let mut users = USERS.write().await;
-
-        if users.contains_key(&payload.email) {
-            return AuthError::UserExists.into_response();
+        Ok(_) => {
+            tracing::info!("User {} registered successfully.", payload.email);
+            // After successful registration, attempt to authorize (log in) the user
+            match authorize_user(&pool, &payload).await { // Pass pool to authorize_user
+                Ok(token) => jwt_response(token),
+                Err(err) => err.into_response(),
+            }
         }
-
-        users.insert(payload.email.clone(), payload.password.clone());
-    }
-
-    match authorize_user(&payload).await {
-        Ok(token) => jwt_response(token),
-        Err(err) => err.into_response(),
+        Err(SqlxError::Database(db_error)) if db_error.code() == Some("2067".into()) => { // SQLITE_CONSTRAINT_UNIQUE
+            tracing::warn!("Registration failed: User {} already exists.", payload.email);
+            AuthError::UserExists.into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to register user {}: {:?}", payload.email, e);
+            AuthError::DbError.into_response() // New generic DB error variant
+        }
     }
 }
 
 
 // Core authorization logic (shared by login + register)
-async fn authorize_user(payload: &AuthPayload) -> Result<String, AuthError> {
+async fn authorize_user(
+    pool: &SqlitePool, // Accept the database pool
+    payload: &AuthPayload
+) -> Result<String, AuthError> {
     if payload.email.is_empty() || payload.password.is_empty() {
         return Err(AuthError::MissingCredentials);
     }
 
-    let users = USERS.read().await;
-    match users.get(&payload.email) {
-        Some(stored_password) if stored_password == &payload.password => {
-            let claims = Claims {
-                email: payload.email.clone(),
-                exp: 2_000_000_000,
-            };
+    // Query the database for the user
+    let user_row: Option<SqliteRow> = query("SELECT id, email, password_hash FROM users WHERE email = ?")
+        .bind(&payload.email)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database query error during authorization: {:?}", e);
+            AuthError::DbError
+        })?;
 
-            let token = encode(&Header::default(), &claims, &KEYS.encoding)
-                .map_err(|_| AuthError::TokenCreation)?;
+    match user_row {
+        Some(row) => {
+            let stored_password_hash: String = row.try_get("password_hash")
+                .map_err(|e| {
+                    tracing::error!("Failed to get password_hash from row: {:?}", e);
+                    AuthError::DbError
+                })?;
 
-            // Log user and token
-            tracing::info!("Authorized user: {}, JWT: {}", payload.email, token);
+            // Verify the password
+            if verify_password(&payload.password, &stored_password_hash).map_err(|_| AuthError::WrongCredentials)? {
+                let claims = Claims {
+                    email: payload.email.clone(),
+                    exp: 2_000_000_000, // JWT expiration timestamp
+                };
 
-            Ok(token)
+                let token = encode(&Header::default(), &claims, &KEYS.encoding)
+                    .map_err(|_| AuthError::TokenCreation)?;
+
+                tracing::info!("Authorized user: {}", payload.email);
+                Ok(token)
+            } else {
+                tracing::warn!("Authorization failed: Wrong password for user {}", payload.email);
+                Err(AuthError::WrongCredentials)
+            }
         }
-        _ => Err(AuthError::WrongCredentials),
+        None => {
+            tracing::warn!("Authorization failed: User {} not found.", payload.email);
+            Err(AuthError::WrongCredentials) // User not found
+        }
     }
 }
 
+// Password Hashing Helper
+fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    argon2.hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+}
+
+// Password Verification Helper
+fn verify_password(password: &str, hashed_password: &str) -> Result<bool, argon2::password_hash::Error> {
+    let parsed_hash = PasswordHash::new(hashed_password)?;
+    Ok(Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok())
+}
+
+
 // Shared cookie + redirect response builder
 fn jwt_response(token: String) -> Response {
-    let cookie = format!("auth_token={}; HttpOnly; Path=/", token);
+    let cookie = format!("auth_token={}; HttpOnly; Path=/; Max-Age={}", token, 60 * 60 * 24 * 7);
+
 
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
@@ -217,15 +300,20 @@ fn jwt_response(token: String) -> Response {
 async fn login_page() -> impl IntoResponse {
     match fs::read_to_string("login.html") {
         Ok(contents) => Html(contents).into_response(),
-        Err(_) => Html("<h1>Login page not found</h1>").into_response(),
+        Err(_) => {
+            tracing::error!("login.html not found!");
+            Html("<h1>Login page not found</h1>").into_response()
+        },
     }
 }
 
 async fn register_page() -> impl IntoResponse {
     match fs:: read_to_string("register.html") {
         Ok(contents) => Html(contents).into_response(),
-        Err(_) => Html("<h1>Register page not found</h1>").into_response(),
-
+        Err(_) => {
+            tracing::error!("register.html not found!");
+            Html("<h1>Register page not found</h1>").into_response()
+        },
     }
 }
 
@@ -304,8 +392,10 @@ struct AuthPayload {
 enum AuthError {
     WrongCredentials,
     MissingCredentials,
-    UserExists,           // new error variant
+    UserExists,
     TokenCreation,
+    PasswordHashingFailed, // New error variant for hashing issues
+    DbError,               // Generic database error
 }
 
 
@@ -314,13 +404,12 @@ impl IntoResponse for AuthError {
         let (status, error_message) = match self {
             AuthError::WrongCredentials => (StatusCode::UNAUTHORIZED, "Wrong credentials"),
             AuthError::MissingCredentials => (StatusCode::BAD_REQUEST, "Missing credentials"),
-            AuthError::UserExists => (StatusCode::CONFLICT, "User already exists"), 
-            AuthError::TokenCreation => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Token creation error")
-            }
+            AuthError::UserExists => (StatusCode::CONFLICT, "User already exists"),
+            AuthError::TokenCreation => (StatusCode::INTERNAL_SERVER_ERROR, "Token creation error"),
+            AuthError::PasswordHashingFailed => (StatusCode::INTERNAL_SERVER_ERROR, "Password hashing failed"),
+            AuthError::DbError => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
         };
         let body = Json(json!({ "error": error_message }));
         (status, body).into_response()
     }
 }
-
