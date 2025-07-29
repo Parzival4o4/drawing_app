@@ -34,7 +34,7 @@ ENV DATABASE_URL="sqlite:///app/data/sqlx_build_cache.db"
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY login.html register.html home.html ./
+COPY login.html register.html ./
 COPY migrations ./migrations
 
 # Verification and migration steps
