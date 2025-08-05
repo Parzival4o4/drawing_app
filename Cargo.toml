@@ -20,3 +20,4 @@ dotenvy = "0.15"
 
 argon2 = "0.5" # For password hashing
 rand_core = { version = "0.6", features = ["std"] } # Dependency for argon2, ensures random salt generation
+uuid = { version = "1.8", features = ["v4", "serde"] } # "v4" for random UUIDs, "serde" for easy serialization/deserialization
