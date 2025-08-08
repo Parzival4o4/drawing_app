@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     Json,
 };
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Validation};
+use jsonwebtoken::{decode, DecodingKey, EncodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use argon2::{
@@ -121,7 +121,14 @@ pub async fn auth_middleware(
 ) -> Response {
     match claims_result {
         Ok(claims) => {
-            tracing::debug!("Authenticated user: {} (ID: {}) accessing {:?}", claims.email, claims.user_id, request.uri());
+            tracing::debug!("Authenticated user claims: user_id={}, email={}, display_name={}, exp={}, canvas_permissions={:?}. Accessing URI: {:?}", 
+                claims.user_id,
+                claims.email,
+                claims.display_name,
+                claims.exp,
+                claims.canvas_permissions,
+                request.uri()
+            );
             let mut request = request;
             request.extensions_mut().insert(claims);
             next.run(request).await
@@ -148,26 +155,54 @@ pub fn verify_password(password: &str, hashed_password: &str) -> Result<bool, ar
     Ok(Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok())
 }
 
-// Shared cookie + redirect response builder
-pub fn jwt_response(claims: Claims) -> Response {
-    let token = match encode(&jsonwebtoken::Header::default(), &claims, &KEYS.encoding) {
-        Ok(token) => token,
-        Err(e) => {
-            tracing::error!("Failed to create token in jwt_response: {:?}", e);
-            // This case should ideally not happen if KEYS is correctly initialized
-            // and Claims are serializable. But we return an internal server error
-            // if it does.
-            return AuthError::TokenCreation.into_response();
-        }
-    };
 
-    tracing::debug!("issuing token for user_id: {}", claims.user_id);
-    let cookie = format!("auth_token={}; HttpOnly; Path=/; Max-Age={}", token, 60 * 60 * 24 * 7);
+pub async fn authorize_user(
+    pool: &SqlitePool,
+    email: &str,
+    password: &str,
+) -> Result<String, AuthError> {
+    if email.is_empty() || password.is_empty() {
+        return Err(AuthError::MissingCredentials);
+    }
 
+    // Fetch only the user_id and password_hash needed for authentication.
+    // The rest of the claims will be handled by `create_cookie`.
+    let user_row = sqlx::query!(
+        "SELECT user_id, password_hash FROM users WHERE email = ?",
+        email
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database query error during authorization (user fetch): {:?}", e);
+        AuthError::DbError
+    })?
+    .ok_or(AuthError::WrongCredentials)?; // If user not found, return WrongCredentials
+
+    // Use the existing `verify_password` function to check the password.
+    if verify_password(password, &user_row.password_hash).map_err(|_| AuthError::WrongCredentials)? {
+        // Call our refactored create_cookie function, creating the PartialClaims
+        // struct directly within the function call.
+        create_cookie(
+            pool,
+            PartialClaims {
+                email: email.to_string(),
+                user_id: user_row.user_id,
+                ..PartialClaims::default()
+            },
+        ).await
+    } else {
+        tracing::info!("Authorization failed: Wrong password for user {}", email);
+        Err(AuthError::WrongCredentials)
+    }
+}
+
+
+// NEW: Builds a HeaderMap with the Set-Cookie header from a given cookie string.
+pub fn create_cookie_header(cookie: String) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());
-
-    (headers, Redirect::to("/")).into_response()
+    headers
 }
 
 
@@ -229,7 +264,7 @@ pub async fn create_cookie(pool: &SqlitePool, claims_data: PartialClaims) -> Res
 
     // --- Step 2: Handle canvas_permissions ---
     if canvas_permissions.is_none() {
-        tracing::debug!("Canvas permissions missing, fetching permissions for user_id: {}", final_user_id);
+        tracing::debug!("fetching Canvas permissions for user_id: {}", final_user_id);
         
         // This is where the macro syntax was incorrect.
         // `query_as!` expects a struct name. Since there is no struct for this,
@@ -274,8 +309,22 @@ pub async fn create_cookie(pool: &SqlitePool, claims_data: PartialClaims) -> Res
             AuthError::TokenCreation
         })?;
 
-    tracing::debug!("Issuing cookie for user_id: {}", final_user_id);
-    let cookie = format!("auth_token={}; HttpOnly; Path=/; Max-Age={}", token, COOKIE_MAX_AGE_SECONDS);
+    tracing::debug!("Issuing cookie with claims: user_id={}, email={}, display_name={}, exp={}, canvas_permissions={:?}", 
+        claims_to_encode.user_id,
+        claims_to_encode.email,
+        claims_to_encode.display_name,
+        claims_to_encode.exp,
+        claims_to_encode.canvas_permissions
+    );
+    tracing::debug!("    JWT={}\n", 
+        token
+    );
+    let cookie = format!(
+        "auth_token={}; HttpOnly; Path=/; Max-Age={}; SameSite=Strict",
+        token,
+        COOKIE_MAX_AGE_SECONDS
+    );
+
 
     Ok(cookie)
 }

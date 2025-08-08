@@ -7,17 +7,15 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::{query_as, sqlite::{SqlitePool, SqliteRow}};
-use sqlx::{Error as SqlxError, Row, query};
+use sqlx::{sqlite::{SqlitePool, }};
+use sqlx::{Error as SqlxError, query};
 use uuid::Uuid;
-use std::{collections::HashMap, fs};
+use std::{fs};
 
 // Import types and functions from the auth module
 use crate::auth::{
-    AuthError, Claims,
-    hash_password, verify_password, jwt_response,
+    authorize_user, create_cookie, create_cookie_header, hash_password, AuthError, Claims, PartialClaims
 };
-use crate::KEYS; // Import KEYS from the main crate
 
 
 
@@ -32,6 +30,7 @@ pub async fn handle_404() -> Response {
 pub struct CreateCanvasPayload {
     pub name: String,
 }
+
 
 pub async fn create_canvas(
     State(pool): State<SqlitePool>,
@@ -93,8 +92,6 @@ pub async fn create_canvas(
         }
         Err(e) => {
             tx.rollback().await.ok();
-            // This error case is less likely if canvas insert succeeded and primary key is composite.
-            // But handle it for completeness.
             tracing::error!("Failed to set owner permissions for canvas ID {}: {:?}", canvas_id, e);
             return AuthError::DbError.into_response();
         }
@@ -104,18 +101,35 @@ pub async fn create_canvas(
     match tx.commit().await {
         Ok(_) => {
             tracing::info!("Transaction committed for creating canvas ID: {}", canvas_id);
-            (StatusCode::CREATED, Json(json!({
-                "message": "Canvas created successfully",
-                "canvas_id": canvas_id,
-                "name": canvas_name,
-                "owner_user_id": owner_user_id,
-                "permission_level": "O" // Indicate the user's permission
-            }))).into_response()
         }
         Err(e) => {
             tracing::error!("Failed to commit transaction for canvas ID {}: {:?}", canvas_id, e);
-            AuthError::DbError.into_response()
+            return AuthError::DbError.into_response();
         }
+    }
+    
+    // 6. Create a new cookie with the updated permissions
+    let mut updated_canvas_permissions = claims.canvas_permissions.clone();
+    updated_canvas_permissions.insert(canvas_id.clone(), "O".to_string()); // Add the new canvas permission
+
+    match create_cookie(
+        &pool,
+        PartialClaims {
+            email: claims.email.clone(),
+            user_id: Some(claims.user_id),
+            display_name: Some(claims.display_name.clone()),
+            canvas_permissions: Some(updated_canvas_permissions), // Pass the updated list
+        },
+    )
+    .await {
+        Ok(cookie) => {
+            let headers = create_cookie_header(cookie);
+            (StatusCode::CREATED, headers, Json(json!({
+                "message": "Canvas created successfully",
+                "canvas_id": canvas_id,
+            }))).into_response()
+        }
+        Err(e) => e.into_response(),
     }
 }
 
@@ -132,6 +146,7 @@ pub async fn get_user_info(
 }
 
 
+// Handler for updating a user's profile information.
 #[derive(Debug, Deserialize)]
 pub struct UpdateUserPayload {
     pub email: Option<String>,
@@ -156,8 +171,6 @@ pub async fn update_profile(
         }
     };
 
-    // Start with the current claims' email and display_name,
-    // which will be updated if the payload contains new values.
     let mut updated_email = claims.email.clone();
     let mut updated_display_name = claims.display_name.clone();
 
@@ -228,16 +241,27 @@ pub async fn update_profile(
         }
     }
 
-    // NEW: Construct new_claims by cloning 'claims' and overriding 'email' and 'display_name'
-    let new_claims = Claims {
-        email: updated_email,
-        display_name: updated_display_name,
-        // All other fields (user_id, exp, canvas_permissions) are copied from the original 'claims'
-        ..claims
-    };
-
-    jwt_response(new_claims)
+    // After a successful update, create a new cookie with the updated claims
+    // and return it with a redirect.
+    match create_cookie(
+        &pool,
+        PartialClaims {
+            email: updated_email,
+            display_name: Some(updated_display_name),
+            user_id: Some(claims.user_id),
+            canvas_permissions: Some(claims.canvas_permissions), // Keep the existing permissions
+        },
+    )
+    .await {
+        Ok(cookie) => {
+            let headers = create_cookie_header(cookie);
+            // Changed from Redirect to a success message with headers.
+            (StatusCode::OK, headers, Json(json!({"message": "Profile updated successfully."}))).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
 }
+
 
 
 // ====================== login logout ======================
@@ -247,11 +271,14 @@ pub async fn logout() -> impl IntoResponse {
 
     headers.insert(
         axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_static("auth_token=; HttpOnly; Path=/; Max-Age=0"),
+        axum::http::HeaderValue::from_static(
+            "auth_token=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict"
+        ),
     );
 
     (headers, Redirect::to("/login")).into_response()
 }
+
 
 
 #[derive(Debug, Deserialize)]
@@ -262,17 +289,29 @@ pub struct LoginPayload {
 
 pub async fn login(
     State(pool): State<SqlitePool>,
-    Form(payload): Form<LoginPayload>
+    Form(payload): Form<LoginPayload>,
 ) -> impl IntoResponse {
-    match authorize_user(&pool, &payload).await {
-        Ok(claims) => jwt_response(claims), // Pass the Claims to jwt_response
-        Err(e) => e.into_response(),
+    // Attempt to authorize the user and get the cookie string.
+    match authorize_user(&pool, &payload.email, &payload.password).await {
+        Ok(cookie) => {
+            // If authorization is successful, create the headers with the cookie.
+            let headers = create_cookie_header(cookie);
+            
+            // Return the headers along with a redirect to the home page.
+            (headers, Redirect::to("/")).into_response()
+        }
+        Err(e) => {
+            // If there's an error, convert it into an appropriate HTTP response.
+            e.into_response()
+        }
     }
 }
 
 
+
+// Handler for user registration.
 #[derive(Debug, Deserialize)]
-pub struct AuthPayload {
+pub struct RegisterPayload {
     pub email: String,
     pub password: String,
     pub display_name: String,
@@ -280,7 +319,7 @@ pub struct AuthPayload {
 
 pub async fn register(
     State(pool): State<SqlitePool>,
-    Form(payload): Form<AuthPayload>
+    Form(payload): Form<RegisterPayload>
 ) -> impl IntoResponse {
     if payload.email.is_empty() || payload.password.is_empty() || payload.display_name.is_empty() {
         return AuthError::MissingCredentials.into_response();
@@ -302,8 +341,24 @@ pub async fn register(
     {
         Ok(_) => {
             tracing::info!("User {} registered successfully.", payload.email);
-            match authorize_user(&pool, &payload).await {
-                Ok(claims) => jwt_response(claims), // Pass the Claims to jwt_response
+            
+            // directly use create_cookie and create_cookie_header
+            // after a successful registration.
+            match create_cookie(
+                &pool,
+                PartialClaims {
+                    email: payload.email.clone(),
+                    user_id: None, // Let create_cookie handle the lookup
+                    display_name: Some(payload.display_name),
+                    ..PartialClaims::default()
+                },
+            )
+            .await
+            {
+                Ok(cookie) => {
+                    let headers = create_cookie_header(cookie);
+                    (headers, Redirect::to("/")).into_response()
+                }
                 Err(e) => e.into_response(),
             }
         }
@@ -319,110 +374,7 @@ pub async fn register(
 }
 
 
-pub trait AuthCommon {
-    fn email(&self) -> &str;
-    fn password(&self) -> &str;
-}
 
-impl AuthCommon for AuthPayload {
-    fn email(&self) -> &str { &self.email }
-    fn password(&self) -> &str { &self.password }
-}
-
-impl AuthCommon for LoginPayload {
-    fn email(&self) -> &str { &self.email }
-    fn password(&self) -> &str { &self.password }
-}
-
-
-pub async fn authorize_user<T>(
-    pool: &SqlitePool,
-    payload: &T
-) -> Result<Claims, AuthError> // <--- CHANGE: Now returns Claims on success
-where
-    T: AuthCommon + Send + Sync + 'static,
-{
-    if payload.email().is_empty() || payload.password().is_empty() {
-        return Err(AuthError::MissingCredentials);
-    }
-
-    let user_row: Option<SqliteRow> = query(
-        "SELECT user_id, email, password_hash, display_name FROM users WHERE email = ?"
-    )
-    .bind(payload.email())
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Database query error during authorization (user fetch): {:?}", e);
-        AuthError::DbError
-    })?;
-
-    match user_row {
-        Some(row) => {
-            let stored_password_hash: String = row.try_get("password_hash")
-                .map_err(|e| {
-                    tracing::error!("Failed to get password_hash from row: {:?}", e);
-                    AuthError::DbError
-                })?;
-
-            if verify_password(payload.password(), &stored_password_hash).map_err(|_| AuthError::WrongCredentials)? {
-                let user_id: i64 = row.try_get("user_id")
-                    .map_err(|e| {
-                        tracing::error!("Failed to get user_id from row: {:?}", e);
-                        AuthError::DbError
-                    })?;
-                let display_name: String = row.try_get("display_name")
-                    .map_err(|e| {
-                        tracing::error!("Failed to get display_name from row: {:?}", e);
-                        AuthError::DbError
-                    })?;
-
-                // Define a temporary struct to hold the query result for permissions
-                #[derive(sqlx::FromRow)]
-                struct UserCanvasPermission {
-                    canvas_id: String,
-                    permission_level: String,
-                }
-
-                let user_permissions: Vec<UserCanvasPermission> = query_as!(
-                    UserCanvasPermission,
-                    "SELECT canvas_id, permission_level FROM Canvas_Permissions WHERE user_id = ?",
-                    user_id
-                )
-                .fetch_all(pool)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Database query error fetching canvas permissions for user {}: {:?}", user_id, e);
-                    AuthError::DbError
-                })?;
-
-                // Convert Vec<UserCanvasPermission> into HashMap<String, String>
-                let canvas_permissions: HashMap<String, String> = user_permissions
-                    .into_iter()
-                    .map(|p| (p.canvas_id, p.permission_level))
-                    .collect();
-
-                let claims = Claims {
-                    user_id,
-                    email: payload.email().to_string(),
-                    display_name,
-                    exp: 2_000_000_000,
-                    canvas_permissions,
-                };
-
-                tracing::info!("Authorized user: {} (ID: {}) with {} canvas permissions", claims.email, claims.user_id, claims.canvas_permissions.len());
-                Ok(claims) // <--- CHANGE: Now return the Claims struct
-            } else {
-                tracing::info!("Authorization failed: Wrong password for user {}", payload.email());
-                Err(AuthError::WrongCredentials)
-            }
-        }
-        None => {
-            tracing::info!("Authorization failed: User {} not found.", payload.email());
-            Err(AuthError::WrongCredentials)
-        }
-    }
-}
 
 pub async fn login_page() -> impl IntoResponse {
     match fs::read_to_string("login.html") {

@@ -96,7 +96,7 @@ fn create_app_router(pool: SqlitePool) -> Router {
         // Routes that need authentication, placed *before* the auth_middleware
         .route("/api/user-info", get(get_user_info))
         .route("/profile", post(update_profile))
-        .route("/api/canvas", post(create_canvas))
+        .route("/api/canvases", post(create_canvas))
         // Apply auth middleware to everything above this point, including the fallback.
         // The middleware will add Claims to the request extensions.
         .fallback_service(protected_static_files_service)

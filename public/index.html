@@ -6,6 +6,52 @@
     <link rel="stylesheet" href="style.css" />
 
     <style>
+    .create-canvas-form {
+        background-color: #ffffff;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-top: 15px;
+        max-width: 400px; /* Limit width for better readability */
+        }
+
+    .profile-edit-form label, .create-canvas-form label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+        font-size: 0.9em;
+        }
+
+    .create-canvas-form input[type="text"] {
+        width: calc(100% - 20px);
+        padding: 8px 10px;
+        margin-bottom: 15px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        box-sizing: border-box; /* Include padding in width */
+        }
+
+    .create-canvas-form button {
+        padding: 8px 15px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-weight: bold;
+        font-size: 0.9em;
+        }
+    .create-canvas-form button[type="submit"] {
+        background-color: #007bff;
+        color: white;
+        }
+    .create-canvas-btn {
+        background-color: #17a2b8;
+        color: white;
+    }
+
+    .create-canvas-btn:hover {
+        background-color: #138496;
+    }
+
         body {
             font-family: Arial, sans-serif;
             margin: 20px;
@@ -160,6 +206,7 @@
             <p>Welcome, <strong id="userDisplayName">Loading...</strong>!</p>
             <p>Email: <strong id="userEmail">Loading...</strong></p>
             <button id="editProfileBtn" class="edit-profile-btn">Edit Profile</button>
+            <button id="createCanvasBtn" class="create-canvas-btn">Create New Canvas</button>
         </div>
         <form method="POST" action="/logout">
             <button type="submit" class="logout-btn">Logout</button>
@@ -181,6 +228,19 @@
         <div id="updateMessage" class="message" style="display: none;"></div>
     </div>
 
+    <div id="createCanvasSection" class="create-canvas-form" style="display: none;">
+        <h3>Create New Canvas</h3>
+        <form id="createCanvasForm">
+            <label for="canvasName">Canvas Name:</label>
+            <input type="text" id="canvasName" name="name" required>
+            
+            <button type="submit">Create</button>
+            <button type="button" id="cancelCreateCanvasBtn" class="cancel-btn">Cancel</button>
+        </form>
+        <div id="createCanvasMessage" class="message" style="display: none;"></div>
+    </div>
+
+
     <p>
     Haben Sie eines ausgewählt, können Sie mit der Maus
     die entsprechenden Figuren zeichen. Typischerweise, indem
@@ -192,114 +252,172 @@
     <canvas id="drawArea" width="1024" height="768"></canvas>
     <textarea id="textarea" cols="130" rows="20" name = "event_log"></textarea>
     <button id="button" type="button">Laden</button>
+<script>
+    document.addEventListener('DOMContentLoaded', async () => {
+        const userDisplayNameElem = document.getElementById('userDisplayName');
+        const userEmailElem = document.getElementById('userEmail');
+        const editProfileBtn = document.getElementById('editProfileBtn');
+        const profileEditSection = document.getElementById('profileEditSection');
+        const updateProfileForm = document.getElementById('updateProfileForm');
+        const cancelEditBtn = document.getElementById('cancelEditBtn');
+        const newEmailInput = document.getElementById('newEmail');
+        const newDisplayNameInput = document.getElementById('newDisplayName');
+        const updateMessage = document.getElementById('updateMessage');
+        const createCanvasBtn = document.getElementById('createCanvasBtn');
+        const createCanvasSection = document.getElementById('createCanvasSection');
+        const createCanvasForm = document.getElementById('createCanvasForm');
+        const cancelCreateCanvasBtn = document.getElementById('cancelCreateCanvasBtn');
+        const canvasNameInput = document.getElementById('canvasName');
+        const createCanvasMessage = document.getElementById('createCanvasMessage');
 
-    <script>
-        document.addEventListener('DOMContentLoaded', async () => {
-            const userDisplayNameElem = document.getElementById('userDisplayName');
-            const userEmailElem = document.getElementById('userEmail');
-            const editProfileBtn = document.getElementById('editProfileBtn');
-            const profileEditSection = document.getElementById('profileEditSection');
-            const updateProfileForm = document.getElementById('updateProfileForm');
-            const cancelEditBtn = document.getElementById('cancelEditBtn');
-            const newEmailInput = document.getElementById('newEmail');
-            const newDisplayNameInput = document.getElementById('newDisplayName');
-            const updateMessage = document.getElementById('updateMessage');
-
-            // Function to fetch and display user info
-            async function fetchAndDisplayUserInfo() {
-                try {
-                    const response = await fetch('/api/user-info'); // Request user info from backend
-                    if (response.ok) {
-                        const userInfo = await response.json();
-                        userDisplayNameElem.textContent = userInfo.display_name || 'Guest';
-                        userEmailElem.textContent = userInfo.email || 'N/A';
-                    } else if (response.status === 302) { // Redirect status, handled by browser usually
-                        // User not authenticated, browser will handle redirect, or you can
-                        // manually redirect if necessary based on your middleware
-                        console.log("Not authenticated, redirecting to login...");
-                    } else {
-                        console.error('Failed to fetch user info:', response.status);
-                        userDisplayNameElem.textContent = 'Error Loading';
-                        userEmailElem.textContent = 'Error Loading';
-                    }
-                } catch (error) {
-                    console.error('Network error fetching user info:', error);
-                    userDisplayNameElem.textContent = 'Network Error';
-                    userEmailElem.textContent = 'Network Error';
+        // Function to fetch and display user info
+        async function fetchAndDisplayUserInfo() {
+            try {
+                const response = await fetch('/api/user-info'); // Request user info from backend
+                if (response.ok) {
+                    const userInfo = await response.json();
+                    userDisplayNameElem.textContent = userInfo.display_name || 'Guest';
+                    userEmailElem.textContent = userInfo.email || 'N/A';
+                } else if (response.status === 302) { // Redirect status, handled by browser usually
+                    // User not authenticated, browser will handle redirect, or you can
+                    // manually redirect if necessary based on your middleware
+                    console.log("Not authenticated, redirecting to login...");
+                } else {
+                    console.error('Failed to fetch user info:', response.status);
+                    userDisplayNameElem.textContent = 'Error Loading';
+                    userEmailElem.textContent = 'Error Loading';
                 }
+            } catch (error) {
+                console.error('Network error fetching user info:', error);
+                userDisplayNameElem.textContent = 'Network Error';
+                userEmailElem.textContent = 'Network Error';
+            }
+        }
+
+        // Initial load: Fetch and display user info
+        fetchAndDisplayUserInfo();
+
+        // Toggle profile edit form visibility
+        editProfileBtn.addEventListener('click', () => {
+            profileEditSection.style.display = 'block';
+            // Pre-fill with current values for convenience
+            newEmailInput.value = userEmailElem.textContent === 'N/A' || userEmailElem.textContent === 'Not Logged In' || userEmailElem.textContent === 'Error Loading' || userEmailElem.textContent === 'Network Error' ? '' : userEmailElem.textContent;
+            newDisplayNameInput.value = userDisplayNameElem.textContent === 'Guest' || userDisplayNameElem.textContent === 'Not Logged In' || userDisplayNameElem.textContent === 'Error Loading' || userDisplayNameElem.textContent === 'Network Error' ? '' : userDisplayNameElem.textContent;
+            updateMessage.style.display = 'none'; // Hide previous messages
+        });
+        
+        // Toggle create canvas form visibility
+        createCanvasBtn.addEventListener('click', () => {
+            createCanvasSection.style.display = 'block';
+            createCanvasMessage.style.display = 'none';
+        });
+
+        cancelEditBtn.addEventListener('click', () => {
+            profileEditSection.style.display = 'none';
+            updateMessage.style.display = 'none'; // Hide message when closing
+        });
+
+        cancelCreateCanvasBtn.addEventListener('click', () => {
+            createCanvasSection.style.display = 'none';
+            createCanvasMessage.style.display = 'none';
+        });
+
+        // Handle profile update form submission
+        updateProfileForm.addEventListener('submit', async (event) => {
+            event.preventDefault(); // Prevent default form submission
+
+            const formData = new FormData(updateProfileForm);
+            const data = {};
+            // Only include fields that have a value
+            if (formData.get('email') && formData.get('email').trim() !== '') {
+                data.email = formData.get('email').trim();
+            }
+            if (formData.get('display_name') && formData.get('display_name').trim() !== '') {
+                data.display_name = formData.get('display_name').trim();
             }
 
-            // Initial load: Fetch and display user info
-            fetchAndDisplayUserInfo();
+            // If no fields are provided for update
+            if (Object.keys(data).length === 0) {
+                displayMessage('No changes to save.', 'error', 'update');
+                return;
+            }
 
-            // Toggle profile edit form visibility
-            editProfileBtn.addEventListener('click', () => {
-                profileEditSection.style.display = 'block';
-                // Pre-fill with current values for convenience
-                // Use the currently displayed values, or refetch from /api/user-info if you want to be super fresh
-                newEmailInput.value = userEmailElem.textContent === 'N/A' || userEmailElem.textContent === 'Not Logged In' || userEmailElem.textContent === 'Error Loading' || userEmailElem.textContent === 'Network Error' ? '' : userEmailElem.textContent;
-                newDisplayNameInput.value = userDisplayNameElem.textContent === 'Guest' || userDisplayNameElem.textContent === 'Not Logged In' || userDisplayNameElem.textContent === 'Error Loading' || userDisplayNameElem.textContent === 'Network Error' ? '' : userDisplayNameElem.textContent;
-                updateMessage.style.display = 'none'; // Hide previous messages
-            });
+            // Convert data to URL-encoded form data
+            const formBody = Object.keys(data).map(key => encodeURIComponent(key) + '=' + encodeURIComponent(data[key])).join('&');
 
-            cancelEditBtn.addEventListener('click', () => {
-                profileEditSection.style.display = 'none';
-                updateMessage.style.display = 'none'; // Hide message when closing
-            });
+            try {
+                const response = await fetch('/profile', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: formBody
+                });
 
-            // Handle profile update form submission
-            updateProfileForm.addEventListener('submit', async (event) => {
-                event.preventDefault(); // Prevent default form submission
-
-                const formData = new FormData(updateProfileForm);
-                const data = {};
-                // Only include fields that have a value
-                if (formData.get('email') && formData.get('email').trim() !== '') {
-                    data.email = formData.get('email').trim();
+                if (response.ok) {
+                    await fetchAndDisplayUserInfo(); // Re-fetch user info after successful update
+                    displayMessage('Profile updated successfully!', 'success', 'update');
+                    profileEditSection.style.display = 'none'; // Hide form on success
+                } else {
+                    const errorData = await response.json();
+                    displayMessage(`Error: ${errorData.error || 'Failed to update profile.'}`, 'error', 'update');
                 }
-                if (formData.get('display_name') && formData.get('display_name').trim() !== '') {
-                    data.display_name = formData.get('display_name').trim();
-                }
-
-                // If no fields are provided for update
-                if (Object.keys(data).length === 0) {
-                    displayMessage('No changes to save.', 'error');
-                    return;
-                }
-
-                // Convert data to URL-encoded form data
-                const formBody = Object.keys(data).map(key => encodeURIComponent(key) + '=' + encodeURIComponent(data[key])).join('&');
-
-                try {
-                    const response = await fetch('/profile', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            // The `auth_token` cookie will be sent automatically by the browser
-                        },
-                        body: formBody
-                    });
-
-                    if (response.ok) {
-                        await fetchAndDisplayUserInfo(); // Re-fetch user info after successful update
-                        displayMessage('Profile updated successfully!', 'success');
-                        profileEditSection.style.display = 'none'; // Hide form on success
-                    } else {
-                        const errorData = await response.json();
-                        displayMessage(`Error: ${errorData.error || 'Failed to update profile.'}`, 'error');
-                    }
-                } catch (error) {
-                    console.error('Network error:', error);
-                    displayMessage('Network error. Please try again.', 'error');
-                }
-            });
-
-            function displayMessage(message, type) {
-                updateMessage.textContent = message;
-                updateMessage.className = `message ${type}`;
-                updateMessage.style.display = 'block';
+            } catch (error) {
+                console.error('Network error:', error);
+                displayMessage('Network error. Please try again.', 'error', 'update');
             }
         });
-    </script>
+
+        // Handle create canvas form submission
+        createCanvasForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+
+            const formData = new FormData(createCanvasForm);
+            const name = formData.get('name').trim();
+            
+            if (name === '') {
+                displayMessage('Canvas name cannot be empty.', 'error', 'createCanvas');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/canvases', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `name=${encodeURIComponent(name)}`
+                });
+
+                if (response.ok) {
+                    displayMessage('Canvas created successfully!', 'success', 'createCanvas');
+                    canvasNameInput.value = ''; // Clear the input field
+                    // TODO: Implement logic to update the list of canvases
+                } else {
+                    const errorData = await response.json();
+                    displayMessage(`Error: ${errorData.error || 'Failed to create canvas.'}`, 'error', 'createCanvas');
+                }
+            } catch (error) {
+                console.error('Network error:', error);
+                displayMessage('Network error. Please try again.', 'error', 'createCanvas');
+            }
+        });
+
+        function displayMessage(message, type, target) {
+            let messageElement;
+            if (target === 'update') {
+                messageElement = updateMessage;
+            } else if (target === 'createCanvas') {
+                messageElement = createCanvasMessage;
+            } else {
+                return;
+            }
+            messageElement.textContent = message;
+            messageElement.className = `message ${type}`;
+            messageElement.style.display = 'block';
+        }
+    });
+</script>
+
 </body>
 </html>
