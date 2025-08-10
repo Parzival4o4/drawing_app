@@ -8,13 +8,13 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{sqlite::{SqlitePool, }};
-use sqlx::{Error as SqlxError, query};
+use sqlx::{Error as SqlxError};
 use uuid::Uuid;
 use std::{fs};
 
 // Import types and functions from the auth module
 use crate::auth::{
-    authorize_user, create_cookie, create_cookie_header, hash_password, AuthError, Claims, PartialClaims
+    authorize_user, create_cookie_header, get_claims, get_cookie_from_claims, hash_password, AuthError, Claims, PartialClaims
 };
 
 
@@ -39,7 +39,11 @@ pub async fn create_canvas(
 ) -> impl IntoResponse {
     // 1. Validate payload
     if payload.name.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Canvas name cannot be empty."}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Canvas name cannot be empty."})),
+        )
+            .into_response();
     }
 
     // 2. Generate a unique canvas_id
@@ -56,78 +60,77 @@ pub async fn create_canvas(
     };
 
     // 3. Insert into Canvas table
-    match query!(
+    if let Err(e) = sqlx::query!(
         "INSERT INTO Canvas (canvas_id, name, owner_user_id, moderated, event_store) VALUES (?, ?, ?, ?, ?)",
         canvas_id,
         canvas_name,
         owner_user_id,
-        false, // Default: not moderated
-        ""     // Default: empty event_store
+        false,
+        ""
     )
     .execute(&mut *tx)
     .await
     {
-        Ok(_) => {
-            tracing::info!("Canvas '{}' (ID: {}) created by user ID: {}.", canvas_name, canvas_id, owner_user_id);
-        }
-        Err(e) => {
-            tx.rollback().await.ok();
-            tracing::error!("Failed to create canvas: {:?}", e);
-            return AuthError::DbError.into_response();
-        }
+        tx.rollback().await.ok();
+        tracing::error!("Failed to create canvas: {:?}", e);
+        return AuthError::DbError.into_response();
     }
 
     // 4. Insert into Canvas_Permissions table (set creator as Owner)
-    match query!(
+    if let Err(e) = sqlx::query!(
         "INSERT INTO Canvas_Permissions (user_id, canvas_id, permission_level) VALUES (?, ?, ?)",
         owner_user_id,
         canvas_id,
-        "O" // 'O' for Owner
+        "O"
     )
     .execute(&mut *tx)
     .await
     {
-        Ok(_) => {
-            tracing::info!("Permissions set for owner (ID: {}) on canvas ID: {}.", owner_user_id, canvas_id);
-        }
-        Err(e) => {
-            tx.rollback().await.ok();
-            tracing::error!("Failed to set owner permissions for canvas ID {}: {:?}", canvas_id, e);
-            return AuthError::DbError.into_response();
-        }
+        tx.rollback().await.ok();
+        tracing::error!("Failed to set owner permissions for canvas ID {}: {:?}", canvas_id, e);
+        return AuthError::DbError.into_response();
     }
 
     // 5. Commit the transaction
-    match tx.commit().await {
-        Ok(_) => {
-            tracing::info!("Transaction committed for creating canvas ID: {}", canvas_id);
-        }
+    if let Err(e) = tx.commit().await {
+        tracing::error!("Failed to commit transaction for canvas ID {}: {:?}", canvas_id, e);
+        return AuthError::DbError.into_response();
+    }
+
+    // 6. Update canvas permissions in claims
+    let mut updated_canvas_permissions = claims.canvas_permissions.clone();
+    updated_canvas_permissions.insert(canvas_id.clone(), "O".to_string());
+
+    // Step 1: Build new claims with updated permissions
+    let updated_partial_claims = PartialClaims {
+        email: claims.email.clone(),
+        user_id: Some(claims.user_id),
+        display_name: Some(claims.display_name.clone()),
+        canvas_permissions: Some(updated_canvas_permissions),
+        exp: claims.exp,
+    };
+
+    let updated_claims = match get_claims(&pool, updated_partial_claims).await {
+        Ok(c) => c,
         Err(e) => {
-            tracing::error!("Failed to commit transaction for canvas ID {}: {:?}", canvas_id, e);
+            tracing::error!("Failed to get updated claims after canvas creation: {:?}", e);
             return AuthError::DbError.into_response();
         }
-    }
-    
-    // 6. Create a new cookie with the updated permissions
-    let mut updated_canvas_permissions = claims.canvas_permissions.clone();
-    updated_canvas_permissions.insert(canvas_id.clone(), "O".to_string()); // Add the new canvas permission
+    };
 
-    match create_cookie(
-        &pool,
-        PartialClaims {
-            email: claims.email.clone(),
-            user_id: Some(claims.user_id),
-            display_name: Some(claims.display_name.clone()),
-            canvas_permissions: Some(updated_canvas_permissions), // Pass the updated list
-        },
-    )
-    .await {
+    // Step 2: Create new cookie from updated claims
+    match get_cookie_from_claims(updated_claims).await {
         Ok(cookie) => {
             let headers = create_cookie_header(cookie);
-            (StatusCode::CREATED, headers, Json(json!({
-                "message": "Canvas created successfully",
-                "canvas_id": canvas_id,
-            }))).into_response()
+            (
+                StatusCode::CREATED,
+                headers,
+                Json(json!({
+                    "message": "Canvas created successfully",
+                    "canvas_id": canvas_id,
+                })),
+            )
+                .into_response()
         }
         Err(e) => e.into_response(),
     }
@@ -176,12 +179,16 @@ pub async fn update_profile(
 
     if let Some(new_email) = payload.email {
         if new_email.is_empty() {
-             tx.rollback().await.ok();
-             return (StatusCode::BAD_REQUEST, Json(json!({"error": "Email cannot be empty."}))).into_response();
+            tx.rollback().await.ok();
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "Email cannot be empty."}))).into_response();
         }
-        match query!("SELECT user_id FROM users WHERE email = ? AND user_id != ?", new_email, claims.user_id)
-            .fetch_optional(&mut *tx)
-            .await
+        match sqlx::query!(
+            "SELECT user_id FROM users WHERE email = ? AND user_id != ?",
+            new_email,
+            claims.user_id
+        )
+        .fetch_optional(&mut *tx)
+        .await
         {
             Ok(Some(_)) => {
                 tx.rollback().await.ok();
@@ -189,20 +196,20 @@ pub async fn update_profile(
                 return AuthError::UserExists.into_response();
             }
             Ok(None) => {
-                match query!("UPDATE users SET email = ? WHERE user_id = ?", new_email, claims.user_id)
-                    .execute(&mut *tx)
-                    .await
+                if let Err(e) = sqlx::query!(
+                    "UPDATE users SET email = ? WHERE user_id = ?",
+                    new_email,
+                    claims.user_id
+                )
+                .execute(&mut *tx)
+                .await
                 {
-                    Ok(_) => {
-                        tracing::info!("User {} (ID: {}) updated email to '{}'.", claims.email, claims.user_id, new_email);
-                        updated_email = new_email;
-                    }
-                    Err(e) => {
-                        tx.rollback().await.ok();
-                        tracing::error!("Failed to update email for user {}: {:?}", claims.user_id, e);
-                        return AuthError::DbError.into_response();
-                    }
+                    tx.rollback().await.ok();
+                    tracing::error!("Failed to update email for user {}: {:?}", claims.user_id, e);
+                    return AuthError::DbError.into_response();
                 }
+                tracing::info!("User {} (ID: {}) updated email to '{}'.", claims.email, claims.user_id, new_email);
+                updated_email = new_email;
             }
             Err(e) => {
                 tx.rollback().await.ok();
@@ -217,20 +224,20 @@ pub async fn update_profile(
             tx.rollback().await.ok();
             return (StatusCode::BAD_REQUEST, Json(json!({"error": "Display name cannot be empty."}))).into_response();
         }
-        match query!("UPDATE users SET display_name = ? WHERE user_id = ?", new_display_name, claims.user_id)
-            .execute(&mut *tx)
-            .await
+        if let Err(e) = sqlx::query!(
+            "UPDATE users SET display_name = ? WHERE user_id = ?",
+            new_display_name,
+            claims.user_id
+        )
+        .execute(&mut *tx)
+        .await
         {
-            Ok(_) => {
-                tracing::info!("User {} (ID: {}) updated display name to '{}'.", claims.email, claims.user_id, new_display_name);
-                updated_display_name = new_display_name;
-            }
-            Err(e) => {
-                tx.rollback().await.ok();
-                tracing::error!("Failed to update display name for user {}: {:?}", claims.user_id, e);
-                return AuthError::DbError.into_response();
-            }
+            tx.rollback().await.ok();
+            tracing::error!("Failed to update display name for user {}: {:?}", claims.user_id, e);
+            return AuthError::DbError.into_response();
         }
+        tracing::info!("User {} (ID: {}) updated display name to '{}'.", claims.email, claims.user_id, new_display_name);
+        updated_display_name = new_display_name;
     }
 
     match tx.commit().await {
@@ -241,26 +248,39 @@ pub async fn update_profile(
         }
     }
 
-    // After a successful update, create a new cookie with the updated claims
-    // and return it with a redirect.
-    match create_cookie(
-        &pool,
-        PartialClaims {
-            email: updated_email,
-            display_name: Some(updated_display_name),
-            user_id: Some(claims.user_id),
-            canvas_permissions: Some(claims.canvas_permissions), // Keep the existing permissions
-        },
-    )
-    .await {
+    // Step 1: Build new partial claims with updated info
+    let updated_partial_claims = PartialClaims {
+        email: updated_email.clone(),
+        display_name: Some(updated_display_name.clone()),
+        user_id: Some(claims.user_id),
+        canvas_permissions: Some(claims.canvas_permissions.clone()), // Keep existing permissions
+        exp: claims.exp,
+    };
+
+    // Step 2: Fetch full updated claims from DB
+    let updated_claims = match get_claims(&pool, updated_partial_claims).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to get updated claims after profile update: {:?}", e);
+            return AuthError::DbError.into_response();
+        }
+    };
+
+    // Step 3: Create new cookie from updated claims
+    match get_cookie_from_claims(updated_claims).await {
         Ok(cookie) => {
             let headers = create_cookie_header(cookie);
-            // Changed from Redirect to a success message with headers.
-            (StatusCode::OK, headers, Json(json!({"message": "Profile updated successfully."}))).into_response()
+            (
+                StatusCode::OK,
+                headers,
+                Json(json!({"message": "Profile updated successfully."})),
+            )
+                .into_response()
         }
         Err(e) => e.into_response(),
     }
 }
+
 
 
 
@@ -330,7 +350,7 @@ pub async fn register(
         Err(_) => return AuthError::PasswordHashingFailed.into_response(),
     };
 
-    match query!(
+    match sqlx::query!(
         "INSERT INTO users (email, password_hash, display_name) VALUES (?, ?, ?)",
         payload.email,
         password_hash,
@@ -341,26 +361,34 @@ pub async fn register(
     {
         Ok(_) => {
             tracing::info!("User {} registered successfully.", payload.email);
-            
-            // directly use create_cookie and create_cookie_header
-            // after a successful registration.
-            match create_cookie(
-                &pool,
-                PartialClaims {
-                    email: payload.email.clone(),
-                    user_id: None, // Let create_cookie handle the lookup
-                    display_name: Some(payload.display_name),
-                    ..PartialClaims::default()
-                },
-            )
-            .await
-            {
-                Ok(cookie) => {
-                    let headers = create_cookie_header(cookie);
-                    (headers, Redirect::to("/")).into_response()
+
+            // Fetch full claims from DB for this user by email
+            let claims = match get_claims(&pool, PartialClaims {
+                email: payload.email.clone(),
+                user_id: None,
+                display_name: Some(payload.display_name.clone()),
+                ..PartialClaims::default()
+            }).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("Failed to fetch claims after registration: {:?}", e);
+                    return AuthError::DbError.into_response();
                 }
-                Err(e) => e.into_response(),
-            }
+            };
+
+            // Generate the cookie string from full claims
+            let cookie_str = match get_cookie_from_claims(claims).await {
+                Ok(cookie) => cookie,
+                Err(e) => {
+                    tracing::error!("Failed to create cookie after registration: {:?}", e);
+                    return AuthError::TokenCreation.into_response();
+                }
+            };
+
+            // Build cookie header
+            let headers = create_cookie_header(cookie_str);
+
+            (headers, Redirect::to("/")).into_response()
         }
         Err(SqlxError::Database(db_error)) if db_error.code() == Some("2067".into()) => {
             tracing::info!("Registration failed: User {} already exists.", payload.email);
@@ -372,6 +400,8 @@ pub async fn register(
         }
     }
 }
+
+
 
 
 

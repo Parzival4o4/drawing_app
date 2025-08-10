@@ -1,6 +1,6 @@
 // src/main.rs
 use axum::{
-    middleware,
+    middleware::{ from_fn_with_state},
     routing::{any, get, post},
     Router,
 };
@@ -19,8 +19,10 @@ mod handlers;
 // Re-export types from auth and handlers for main's use
 use auth::auth_middleware; // Only need auth_middleware from auth
 use handlers::{
-    get_user_info, handle_404, login_page, login, logout, register_page, register, update_profile, create_canvas
+    get_user_info, handle_404, update_profile, create_canvas
 };
+
+use crate::handlers::{login, login_page, logout, register, register_page};
 
 // ───── 1. Constants / statics ──────────────
 // Corrected LazyLock type annotation
@@ -100,7 +102,7 @@ fn create_app_router(pool: SqlitePool) -> Router {
         // Apply auth middleware to everything above this point, including the fallback.
         // The middleware will add Claims to the request extensions.
         .fallback_service(protected_static_files_service)
-        .layer(middleware::from_fn(auth_middleware))
+        .layer(from_fn_with_state(pool.clone(), auth_middleware))
 
         // Routes that do NOT need authentication, placed *after* the auth_middleware layer
         .route("/login", get(login_page))

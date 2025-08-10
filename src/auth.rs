@@ -1,12 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap};
 
 // src/auth.rs
 use axum::{
-    extract::{FromRequestParts },
-    http::{header, request::Parts, HeaderMap, HeaderValue, StatusCode},
-    middleware::Next,
-    response::{IntoResponse, Redirect, Response},
-    Json,
+    body::Body, extract::{FromRequestParts, State }, http::{header::{self, COOKIE}, request::Parts, HeaderMap, HeaderValue, Request, StatusCode}, middleware::Next, response::{IntoResponse, Redirect, Response}, Json
 };
 use jsonwebtoken::{decode, DecodingKey, EncodingKey, Validation};
 use serde::{Deserialize, Serialize};
@@ -26,7 +22,13 @@ pub struct Claims {
     pub user_id: i64,
     pub email: String,
     pub display_name: String,
+
+    /// Hard expiry: absolute epoch seconds
     pub exp: usize,
+
+    /// Soft reissue time: absolute epoch seconds
+    pub reissue_time: usize,
+
     pub canvas_permissions: HashMap<String, String>,
 }
 
@@ -36,38 +38,45 @@ where
 {
     type Rejection = Redirect;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // Attempt to get claims from request extensions first (if already authenticated by middleware)
-        if let Some(claims) = parts.extensions.get::<Claims>() {
-            return Ok(claims.clone());
-        }
+async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
 
-        let cookies = parts
-            .headers
-            .get(header::COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("");
-
-        let token = cookies
-            .split(';')
-            .find_map(|cookie| {
-                let mut split = cookie.trim().splitn(2, '=');
-                match (split.next(), split.next()) {
-                    (Some("auth_token"), Some(value)) => Some(value),
-                    _ => None,
-                }
-            });
-
-        let token = match token {
-            Some(t) => t,
-            None => return Err(Redirect::to("/login")),
-        };
-
-        let decoded = decode::<Claims>(token, &KEYS.decoding, &Validation::default())
-            .map_err(|_| Redirect::to("/login"))?;
-
-        Ok(decoded.claims)
+    if let Some(claims) = parts.extensions.get::<Claims>() {
+        tracing::debug!("Claims found in extensions, skipping decode");
+        return Ok(claims.clone());
     }
+
+    let cookies = parts.headers.get(COOKIE)
+        .and_then(|hdr| hdr.to_str().ok())
+        .unwrap_or("");
+    tracing::debug!("Cookie header on request in from_request_parts: {:?}", cookies);
+
+    let token = cookies
+        .split(';')
+        .map(|c| c.trim())
+        .find_map(|cookie| {
+            if cookie.starts_with("auth_token=") {
+                Some(cookie.trim_start_matches("auth_token=").to_string())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            tracing::debug!("No auth_token cookie found, redirecting to /login");
+            Redirect::to("/login")
+        })?;
+
+    let token_data = decode::<Claims>(
+        &token,
+        &KEYS.decoding,
+        &Validation::default(),
+    ).map_err(|_| {
+        tracing::debug!("Failed to decode JWT, redirecting to /login");
+        Redirect::to("/login")
+    })?;
+
+    Ok(token_data.claims)
+}
+
 }
 
 pub struct Keys {
@@ -115,30 +124,127 @@ impl IntoResponse for AuthError {
 // ───── 2. Middleware ───────────────────────
 // middleware that dose not require access to internal state 
 pub async fn auth_middleware(
-    claims_result: Result<Claims, Redirect>,
-    request: axum::http::Request<axum::body::Body>,
+    State(pool): State<SqlitePool>,
+    req: Request<Body>,
     next: Next,
 ) -> Response {
+    // Split request into parts and body
+    let (mut parts, body) = req.into_parts();
+
+    // Extract claims from mutable parts
+    let claims_result = Claims::from_request_parts(&mut parts, &pool).await;
+
+    let mut req = Request::from_parts(parts, body);
+
+
+    let claims_result: Result<Claims, Redirect> = match claims_result {
+        Ok(claims) => Ok(claims),
+        Err(_) => Err(Redirect::to("/login")),
+    };
+
+    let now = jsonwebtoken::get_current_timestamp() as usize;
+    let mut set_cookie_header: Option<HeaderMap> = None;
+    tracing::debug!("\n\n---new request---");
+
     match claims_result {
-        Ok(claims) => {
-            tracing::debug!("Authenticated user claims: user_id={}, email={}, display_name={}, exp={}, canvas_permissions={:?}. Accessing URI: {:?}", 
+        Ok(mut claims) => {
+            if claims.exp<= now {
+                tracing::debug!(
+                    "Token for user_id={} expired at {}. URI: {:?}. Redirecting to /login.",
+                    claims.user_id,
+                    claims.exp,
+                    req.uri()
+                );
+                return Redirect::to("/login").into_response();
+            }
+
+            if claims.reissue_time <= now {
+                tracing::debug!(
+                    "Soft-expired token for user_id={} (reissue_time={}), refreshing from DB. URI: {:?}",
+                    claims.user_id,
+                    claims.reissue_time,
+                    req.uri()
+                );
+
+                let partial_claims = PartialClaims {
+                    email: claims.email.clone(),
+                    user_id: Some(claims.user_id),
+                    display_name: Some(claims.display_name.clone()),
+                    canvas_permissions: None,
+                    exp: claims.exp,
+                };
+
+                match get_claims(&pool, partial_claims).await {
+                    Ok(mut fresh_claims) => {
+                        fresh_claims.exp= claims.exp;
+                        fresh_claims.reissue_time = now + REISSUE_AFTER_SECONDS;
+
+                        claims = fresh_claims;
+
+                        if let Ok(cookie_str) = get_cookie_from_claims(claims.clone()).await {
+                            set_cookie_header = Some(create_cookie_header(cookie_str));
+                        } else {
+                            tracing::error!("Failed to create refreshed cookie for user_id={}", claims.user_id);
+                            return Redirect::to("/login").into_response();
+                        }
+
+                        tracing::debug!(
+                            "Issued refreshed token for user_id={} (new reissue_time={}).",
+                            claims.user_id,
+                            claims.reissue_time
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Could not refresh claims from DB for user_id={}: {:?}. Redirecting to /login.",
+                            claims.user_id,
+                            e
+                        );
+                        return Redirect::to("/login").into_response();
+                    }
+                }
+            }
+
+            tracing::debug!(
+                "Authenticated user claims: user_id={}, email={}, display_name={}, exp={}, reissue_time={}, canvas_permissions={:?}. URI: {:?}",
                 claims.user_id,
                 claims.email,
                 claims.display_name,
                 claims.exp,
+                claims.reissue_time,
                 claims.canvas_permissions,
-                request.uri()
+                req.uri()
             );
-            let mut request = request;
-            request.extensions_mut().insert(claims);
-            next.run(request).await
+
+            req.extensions_mut().insert(claims);
+
+            tracing::debug!("running handler now");
+            let mut response = next.run(req).await;
+            tracing::debug!("running handler done");
+
+            if let Some(cookie_headers) = set_cookie_header {
+                if !response.headers().contains_key(axum::http::header::SET_COOKIE) {
+                    tracing::debug!("response dose not jet contain a cookie");
+                    for (name, value) in cookie_headers.iter() {
+                        response.headers_mut().insert(name, value.clone());
+                    }
+                }else {
+                    tracing::debug!("response dose contain a cookie");
+                }
+            }
+
+            response
         }
         Err(redirect) => {
-            tracing::debug!("Unauthenticated request for {:?}, redirecting to /login", request.uri());
+            tracing::debug!(
+                "Unauthenticated request for {:?}, redirecting to /login",
+                req.uri()
+            );
             redirect.into_response()
         }
     }
 }
+
 
 // ───── 3. Utilities ────────────────────────
 // Password Hashing Helper
@@ -165,8 +271,7 @@ pub async fn authorize_user(
         return Err(AuthError::MissingCredentials);
     }
 
-    // Fetch only the user_id and password_hash needed for authentication.
-    // The rest of the claims will be handled by `create_cookie`.
+    // Fetch user_id and password_hash for authentication only
     let user_row = sqlx::query!(
         "SELECT user_id, password_hash FROM users WHERE email = ?",
         email
@@ -177,20 +282,23 @@ pub async fn authorize_user(
         tracing::error!("Database query error during authorization (user fetch): {:?}", e);
         AuthError::DbError
     })?
-    .ok_or(AuthError::WrongCredentials)?; // If user not found, return WrongCredentials
+    .ok_or(AuthError::WrongCredentials)?;
 
-    // Use the existing `verify_password` function to check the password.
+    // Verify password
     if verify_password(password, &user_row.password_hash).map_err(|_| AuthError::WrongCredentials)? {
-        // Call our refactored create_cookie function, creating the PartialClaims
-        // struct directly within the function call.
-        create_cookie(
-            pool,
-            PartialClaims {
-                email: email.to_string(),
-                user_id: user_row.user_id,
-                ..PartialClaims::default()
-            },
-        ).await
+        // Step 1: Get full claims
+        let partial_claims = PartialClaims {
+            email: email.to_string(),
+            user_id: user_row.user_id,
+            ..PartialClaims::default()
+        };
+
+        let claims = get_claims(pool, partial_claims).await?;
+
+        // Step 2: Create cookie string from claims
+        let cookie = get_cookie_from_claims(claims).await?;
+
+        Ok(cookie)
     } else {
         tracing::info!("Authorization failed: Wrong password for user {}", email);
         Err(AuthError::WrongCredentials)
@@ -208,11 +316,15 @@ pub fn create_cookie_header(cookie: String) -> HeaderMap {
 
 // ───── 4. Create_Jwt ────────────────────────
 
+pub const EXPIRED_AFTER_SECONDS: usize = 60 * 60 * 24 * 7;
+pub const REISSUE_AFTER_SECONDS: usize = 5 * 60;
+
 pub struct PartialClaims {
     pub email: String,
     pub user_id: Option<i64>,
     pub display_name: Option<String>,
     pub canvas_permissions: Option<HashMap<String, String>>,
+    pub exp: usize,
 }
 
 impl Default for PartialClaims {
@@ -222,14 +334,15 @@ impl Default for PartialClaims {
             user_id: None,
             display_name: None,
             canvas_permissions: None,
+            exp: (jsonwebtoken::get_current_timestamp() as usize) + EXPIRED_AFTER_SECONDS,
         }
     }
 }
 
-const COOKIE_MAX_AGE_SECONDS: u64 = 60 * 60 * 24 * 7;
-
-
-pub async fn create_cookie(pool: &SqlitePool, claims_data: PartialClaims) -> Result<String, AuthError> {
+pub async fn get_claims(
+    pool: &SqlitePool,
+    claims_data: PartialClaims,
+) -> Result<Claims, AuthError> {
     let email = claims_data.email;
     let mut user_id = claims_data.user_id;
     let mut display_name = claims_data.display_name;
@@ -237,7 +350,10 @@ pub async fn create_cookie(pool: &SqlitePool, claims_data: PartialClaims) -> Res
 
     // --- Step 1: Handle user_id and display_name ---
     if user_id.is_none() || display_name.is_none() {
-        tracing::debug!("User ID or display name missing, fetching user details for email: {}", email);
+        tracing::debug!(
+            "User ID or display name missing, fetching user details for email: {}",
+            email
+        );
         let user_row = sqlx::query!(
             "SELECT user_id, display_name FROM users WHERE email = ?",
             email
@@ -245,13 +361,14 @@ pub async fn create_cookie(pool: &SqlitePool, claims_data: PartialClaims) -> Res
         .fetch_optional(pool)
         .await
         .map_err(|e| {
-            tracing::error!("Database query error fetching user info: {:?}", e);
+            tracing::error!(
+                "Database query error fetching user info: {:?}",
+                e
+            );
             AuthError::DbError
         })?
         .ok_or(AuthError::UserInfoNotFound)?;
 
-        // FIX: The compiler error indicates `user_row.user_id` is already an `Option<i64>`.
-        // We assign it directly without wrapping it in `Some()` again.
         if user_id.is_none() {
             user_id = user_row.user_id;
         }
@@ -264,67 +381,73 @@ pub async fn create_cookie(pool: &SqlitePool, claims_data: PartialClaims) -> Res
 
     // --- Step 2: Handle canvas_permissions ---
     if canvas_permissions.is_none() {
-        tracing::debug!("fetching Canvas permissions for user_id: {}", final_user_id);
-        
-        // This is where the macro syntax was incorrect.
-        // `query_as!` expects a struct name. Since there is no struct for this,
-        // we can use a temporary struct, or better yet, use `sqlx::query!` and then
-        // manually collect the results into the HashMap.
+        tracing::debug!(
+            "Fetching Canvas permissions for user_id: {}",
+            final_user_id
+        );
+
         let user_permissions = sqlx::query!(
-            "SELECT canvas_id, permission_level FROM Canvas_Permissions WHERE user_id = ?",
+            "SELECT canvas_id, permission_level 
+             FROM Canvas_Permissions 
+             WHERE user_id = ?",
             final_user_id
         )
         .fetch_all(pool)
         .await
         .map_err(|e| {
-            tracing::error!("Database query error fetching canvas permissions: {:?}", e);
+            tracing::error!(
+                "Database query error fetching canvas permissions: {:?}",
+                e
+            );
             AuthError::DbError
         })?;
-        
-        // The result of `query!` is a Vec of structs with `canvas_id` and `permission_level` fields.
-        // We can iterate over this to build the HashMap.
-        canvas_permissions = Some(user_permissions.into_iter()
-            .map(|row| (row.canvas_id, row.permission_level))
-            .collect());
+
+        canvas_permissions = Some(
+            user_permissions
+                .into_iter()
+                .map(|row| (row.canvas_id, row.permission_level))
+                .collect(),
+        );
     }
 
-    // --- Step 3: Finalize and Encode Claims ---
+    // --- Step 3: Finalize Claims ---
     let final_display_name = display_name.ok_or(AuthError::UserInfoNotFound)?;
     let final_canvas_permissions = canvas_permissions.ok_or(AuthError::UserInfoNotFound)?;
 
-    // Use the new constant to set the expiration
-    let exp = jsonwebtoken::get_current_timestamp() + COOKIE_MAX_AGE_SECONDS;
+    let now = jsonwebtoken::get_current_timestamp() as usize;
 
-    let claims_to_encode = Claims {
+    Ok(Claims {
         user_id: final_user_id,
         email,
         display_name: final_display_name,
-        exp: exp as usize, // Cast to usize for the claims struct
+        exp: claims_data.exp, // keep from original PartialClaims
+        reissue_time: now + REISSUE_AFTER_SECONDS,
         canvas_permissions: final_canvas_permissions,
-    };
+    })
+}
 
-    let token = jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims_to_encode, &KEYS.encoding)
+pub async fn get_cookie_from_claims(claims: Claims) -> Result<String, AuthError> {
+    let token = jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &KEYS.encoding)
         .map_err(|e| {
-            tracing::error!("Failed to create token in create_cookie: {:?}", e);
+            tracing::error!("Failed to create token in get_cookie_from_claims: {:?}", e);
             AuthError::TokenCreation
         })?;
 
-    tracing::debug!("Issuing cookie with claims: user_id={}, email={}, display_name={}, exp={}, canvas_permissions={:?}", 
-        claims_to_encode.user_id,
-        claims_to_encode.email,
-        claims_to_encode.display_name,
-        claims_to_encode.exp,
-        claims_to_encode.canvas_permissions
+    tracing::debug!(
+        "Issuing cookie with claims: user_id={}, email={}, display_name={}, exp={}, canvas_permissions={:?}",
+        claims.user_id,
+        claims.email,
+        claims.display_name,
+        claims.exp,
+        claims.canvas_permissions
     );
-    tracing::debug!("    JWT={}\n", 
-        token
-    );
+    tracing::debug!("    JWT={}\n", token);
+
     let cookie = format!(
         "auth_token={}; HttpOnly; Path=/; Max-Age={}; SameSite=Strict",
         token,
-        COOKIE_MAX_AGE_SECONDS
+        EXPIRED_AFTER_SECONDS 
     );
-
 
     Ok(cookie)
 }
