@@ -7,15 +7,14 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::{sqlite::{SqlitePool, }};
 use sqlx::{Error as SqlxError};
 use uuid::Uuid;
 use std::{fs};
 
 // Import types and functions from the auth module
-use crate::auth::{
+use crate::{auth::{
     authorize_user, create_cookie_header, get_claims, get_cookie_from_claims, hash_password, AuthError, Claims, PartialClaims
-};
+}, AppState};
 
 
 
@@ -33,10 +32,13 @@ pub struct CreateCanvasPayload {
 
 
 pub async fn create_canvas(
-    State(pool): State<SqlitePool>,
+    State(state): State<AppState>,
     claims: Claims, // User who is creating the canvas (owner)
     Form(payload): Form<CreateCanvasPayload>, // Name of the new canvas
 ) -> impl IntoResponse {
+
+    let pool = state.pool;
+
     // 1. Validate payload
     if payload.name.trim().is_empty() {
         return (
@@ -157,10 +159,13 @@ pub struct UpdateUserPayload {
 }
 
 pub async fn update_profile(
-    State(pool): State<SqlitePool>,
+    State(state): State<AppState>,
     claims: Claims, // Extracted by auth_middleware and FromRequestParts
     Form(payload): Form<UpdateUserPayload>, // New payload for updates
 ) -> impl IntoResponse {
+
+    let pool = state.pool;
+
     if payload.email.is_none() && payload.display_name.is_none() {
         tracing::debug!("No fields provided for profile update for user {}", claims.user_id);
         return (StatusCode::NO_CONTENT, Json(json!({"message": "No fields to update"}))).into_response();
@@ -308,11 +313,11 @@ pub struct LoginPayload {
 }
 
 pub async fn login(
-    State(pool): State<SqlitePool>,
+    State(state): State<AppState>,
     Form(payload): Form<LoginPayload>,
 ) -> impl IntoResponse {
     // Attempt to authorize the user and get the cookie string.
-    match authorize_user(&pool, &payload.email, &payload.password).await {
+    match authorize_user(&state.pool, &payload.email, &payload.password).await {
         Ok(cookie) => {
             // If authorization is successful, create the headers with the cookie.
             let headers = create_cookie_header(cookie);
@@ -338,7 +343,7 @@ pub struct RegisterPayload {
 }
 
 pub async fn register(
-    State(pool): State<SqlitePool>,
+    State(state): State<AppState>,
     Form(payload): Form<RegisterPayload>
 ) -> impl IntoResponse {
     if payload.email.is_empty() || payload.password.is_empty() || payload.display_name.is_empty() {
@@ -356,14 +361,14 @@ pub async fn register(
         password_hash,
         payload.display_name
     )
-    .execute(&pool)
+    .execute(&state.pool)
     .await
     {
         Ok(_) => {
             tracing::info!("User {} registered successfully.", payload.email);
 
             // Fetch full claims from DB for this user by email
-            let claims = match get_claims(&pool, PartialClaims {
+            let claims = match get_claims(&state.pool, PartialClaims {
                 email: payload.email.clone(),
                 user_id: None,
                 display_name: Some(payload.display_name.clone()),

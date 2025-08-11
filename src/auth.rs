@@ -14,7 +14,7 @@ use argon2::{
 use sqlx::SqlitePool;
 
 // Import the LazyLock from the main crate
-use crate::KEYS;
+use crate::{AppState, KEYS};
 
 // ───── 1. Types and their impls ────────────
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -38,44 +38,44 @@ where
 {
     type Rejection = Redirect;
 
-async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
 
-    if let Some(claims) = parts.extensions.get::<Claims>() {
-        tracing::debug!("Claims found in extensions, skipping decode");
-        return Ok(claims.clone());
-    }
+        if let Some(claims) = parts.extensions.get::<Claims>() {
+            tracing::debug!("Claims found in extensions, skipping decode");
+            return Ok(claims.clone());
+        }
 
-    let cookies = parts.headers.get(COOKIE)
-        .and_then(|hdr| hdr.to_str().ok())
-        .unwrap_or("");
-    tracing::debug!("Cookie header on request in from_request_parts: {:?}", cookies);
+        let cookies = parts.headers.get(COOKIE)
+            .and_then(|hdr| hdr.to_str().ok())
+            .unwrap_or("");
+        tracing::debug!("Cookie header on request in from_request_parts: {:?}", cookies);
 
-    let token = cookies
-        .split(';')
-        .map(|c| c.trim())
-        .find_map(|cookie| {
-            if cookie.starts_with("auth_token=") {
-                Some(cookie.trim_start_matches("auth_token=").to_string())
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
-            tracing::debug!("No auth_token cookie found, redirecting to /login");
+        let token = cookies
+            .split(';')
+            .map(|c| c.trim())
+            .find_map(|cookie| {
+                if cookie.starts_with("auth_token=") {
+                    Some(cookie.trim_start_matches("auth_token=").to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                tracing::debug!("No auth_token cookie found, redirecting to /login");
+                Redirect::to("/login")
+            })?;
+
+        let token_data = decode::<Claims>(
+            &token,
+            &KEYS.decoding,
+            &Validation::default(),
+        ).map_err(|_| {
+            tracing::debug!("Failed to decode JWT, redirecting to /login");
             Redirect::to("/login")
         })?;
 
-    let token_data = decode::<Claims>(
-        &token,
-        &KEYS.decoding,
-        &Validation::default(),
-    ).map_err(|_| {
-        tracing::debug!("Failed to decode JWT, redirecting to /login");
-        Redirect::to("/login")
-    })?;
-
-    Ok(token_data.claims)
-}
+        Ok(token_data.claims)
+    }
 
 }
 
@@ -124,18 +124,19 @@ impl IntoResponse for AuthError {
 // ───── 2. Middleware ───────────────────────
 // middleware that dose not require access to internal state 
 pub async fn auth_middleware(
-    State(pool): State<SqlitePool>,
+    State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
+    let pool = state.pool.clone();
+    let refresh_list = state.permission_refresh_list.clone();
+
     // Split request into parts and body
     let (mut parts, body) = req.into_parts();
 
     // Extract claims from mutable parts
     let claims_result = Claims::from_request_parts(&mut parts, &pool).await;
-
     let mut req = Request::from_parts(parts, body);
-
 
     let claims_result: Result<Claims, Redirect> = match claims_result {
         Ok(claims) => Ok(claims),
@@ -148,7 +149,8 @@ pub async fn auth_middleware(
 
     match claims_result {
         Ok(mut claims) => {
-            if claims.exp<= now {
+            // Hard expiration check
+            if claims.exp <= now {
                 tracing::debug!(
                     "Token for user_id={} expired at {}. URI: {:?}. Redirecting to /login.",
                     claims.user_id,
@@ -158,14 +160,21 @@ pub async fn auth_middleware(
                 return Redirect::to("/login").into_response();
             }
 
-            if claims.reissue_time <= now {
+            // Check both soft-expire and refresh list
+            let soft_expired = claims.reissue_time <= now;
+            let refresh_list_entry = refresh_list.should_refresh(claims.user_id).await;
+
+            if soft_expired || refresh_list_entry {
                 tracing::debug!(
-                    "Soft-expired token for user_id={} (reissue_time={}), refreshing from DB. URI: {:?}",
+                    "Token for user_id={} needs refresh. soft_expired={}, refresh_list_entry={}, reissue_time={}, URI: {:?}",
                     claims.user_id,
+                    soft_expired,
+                    refresh_list_entry,
                     claims.reissue_time,
                     req.uri()
                 );
 
+                // Refresh claims from DB
                 let partial_claims = PartialClaims {
                     email: claims.email.clone(),
                     user_id: Some(claims.user_id),
@@ -175,16 +184,16 @@ pub async fn auth_middleware(
                 };
 
                 match get_claims(&pool, partial_claims).await {
-                    Ok(mut fresh_claims) => {
-                        fresh_claims.exp= claims.exp;
-                        fresh_claims.reissue_time = now + REISSUE_AFTER_SECONDS;
-
+                    Ok(fresh_claims) => {
                         claims = fresh_claims;
 
                         if let Ok(cookie_str) = get_cookie_from_claims(claims.clone()).await {
                             set_cookie_header = Some(create_cookie_header(cookie_str));
                         } else {
-                            tracing::error!("Failed to create refreshed cookie for user_id={}", claims.user_id);
+                            tracing::error!(
+                                "Failed to create refreshed cookie for user_id={}",
+                                claims.user_id
+                            );
                             return Redirect::to("/login").into_response();
                         }
 
@@ -222,14 +231,15 @@ pub async fn auth_middleware(
             let mut response = next.run(req).await;
             tracing::debug!("running handler done");
 
+            // Add refreshed cookie if needed
             if let Some(cookie_headers) = set_cookie_header {
                 if !response.headers().contains_key(axum::http::header::SET_COOKIE) {
-                    tracing::debug!("response dose not jet contain a cookie");
+                    tracing::debug!("response does not yet contain a cookie");
                     for (name, value) in cookie_headers.iter() {
                         response.headers_mut().insert(name, value.clone());
                     }
-                }else {
-                    tracing::debug!("response dose contain a cookie");
+                } else {
+                    tracing::debug!("response already contains a cookie");
                 }
             }
 
@@ -244,6 +254,7 @@ pub async fn auth_middleware(
         }
     }
 }
+
 
 
 // ───── 3. Utilities ────────────────────────
@@ -451,3 +462,92 @@ pub async fn get_cookie_from_claims(claims: Claims) -> Result<String, AuthError>
 
     Ok(cookie)
 }
+
+
+
+
+
+// -------------- start of the update hash map stuff ------------------------
+
+// As far as I can tell, there is no way to implement timely permission updates in users' JWTs without accessing server-side state on each user request.
+// It is possible to do so without server state only if JWTs expire after a fixed interval.
+// However, this approach either causes permission updates to take minutes to propagate 
+// or requires frequently reissuing JWTs because of a short expiry time.
+//
+// Note that pushing updates through WebSockets alone is insufficient,
+// because a user might not be connected to the web app but still possess a valid token.
+//
+// I believe I have found a good hybrid solution:
+// Whenever changes are made to a user's permissions, an entry is added to a server-side hash map.
+// When that user makes a request, the map is checked for an entry corresponding to the user.
+// If such an entry exists, the user's JWT is refreshed before handling the request.
+//
+// To prevent the hash map from growing uncontrollably over time,
+// JWTs have a reissue time of 5 minutes.
+// If a request arrives with a JWT older than the reissue time, the server issues a new token valid for another 5 minutes.
+// This means we can safely prune all entries from the hash map older than 5 minutes.
+//
+// Access to this server state is efficient (constant time complexity) and fast because it is stored in memory.
+// Space complexity remains bounded due to the automatic pruning mechanism.
+
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio::time::{sleep, Duration};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+type UserId = i64;
+
+#[derive(Clone)]
+pub struct PermissionRefreshList {
+    inner: Arc<RwLock<HashMap<UserId, usize>>>,
+}
+
+impl PermissionRefreshList {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn mark_user_for_refresh(&self, user_id: UserId) {
+        let now = current_timestamp();
+        let mut map = self.inner.write().await;
+        map.insert(user_id, now);
+    }
+
+    pub async fn should_refresh(&self, user_id: UserId) -> bool {
+        let mut map = self.inner.write().await;
+        if map.remove(&user_id).is_some() {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn prune_old_entries(&self, max_age: usize) {
+        let now = current_timestamp();
+        let mut map = self.inner.write().await;
+        map.retain(|_, &mut timestamp| now < timestamp + max_age);
+    }
+}
+
+fn current_timestamp() -> usize {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as usize
+}
+
+pub async fn start_cleanup_task(refresh_list: Arc<PermissionRefreshList>) {
+    let reissue_time: usize = REISSUE_AFTER_SECONDS;
+    let prune_age = reissue_time * 2;
+    let interval = Duration::from_secs(reissue_time as u64);
+
+    loop {
+        sleep(interval).await;
+        tracing::debug!("running refresh List prune");
+        refresh_list.prune_old_entries(prune_age).await;
+        tracing::debug!("done with refresh List prune");
+    }
+}
+

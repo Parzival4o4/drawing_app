@@ -17,12 +17,13 @@ mod auth;
 mod handlers;
 
 // Re-export types from auth and handlers for main's use
-use auth::auth_middleware; // Only need auth_middleware from auth
+use auth::{auth_middleware, PermissionRefreshList}; // Only need auth_middleware from auth
 use handlers::{
     get_user_info, handle_404, update_profile, create_canvas
 };
+use std::sync::Arc;
 
-use crate::handlers::{login, login_page, logout, register, register_page};
+use crate::{auth::start_cleanup_task, handlers::{login, login_page, logout, register, register_page}};
 
 // ───── 1. Constants / statics ──────────────
 // Corrected LazyLock type annotation
@@ -34,17 +35,34 @@ pub(crate) static KEYS: LazyLock<auth::Keys> = LazyLock::new(|| {
 // Static Migrator instance (ensure your `migrations` directory exists at project root)
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: SqlitePool,
+    pub permission_refresh_list: Arc<PermissionRefreshList>,
+}
+
 // ───── 2. Main entrypoint ──────────────────
 #[tokio::main]
 async fn main() {
     setup_tracing();
 
     let pool = setup_database().await;
+    let permission_refresh_list = Arc::new(PermissionRefreshList::new());
 
-    let app = create_app_router(pool);
+    let app_state = AppState {
+        pool: pool.clone(),
+        permission_refresh_list: permission_refresh_list.clone(),
+    };
+
+    // Spawn cleanup task for pruning entries every REISSUE_AFTER_SECONDS
+    tokio::spawn(start_cleanup_task(permission_refresh_list.clone()));
+
+    let app = create_app_router(app_state);
 
     start_server(app).await;
 }
+
 
 // ───── 3. Helper Functions for Main ───────
 
@@ -90,28 +108,26 @@ async fn setup_database() -> SqlitePool {
     pool
 }
 
-fn create_app_router(pool: SqlitePool) -> Router {
+fn create_app_router(state: AppState) -> Router {
     let protected_static_files_service = ServeDir::new("./public")
         .not_found_service(any(handle_404));
 
     Router::new()
-        // Routes that need authentication, placed *before* the auth_middleware
+        // Protected routes
         .route("/api/user-info", get(get_user_info))
         .route("/profile", post(update_profile))
         .route("/api/canvases", post(create_canvas))
-        // Apply auth middleware to everything above this point, including the fallback.
-        // The middleware will add Claims to the request extensions.
         .fallback_service(protected_static_files_service)
-        .layer(from_fn_with_state(pool.clone(), auth_middleware))
-
-        // Routes that do NOT need authentication, placed *after* the auth_middleware layer
+        .layer(from_fn_with_state(state.clone(), auth_middleware))
+        // Public routes
         .route("/login", get(login_page))
         .route("/login", post(login))
         .route("/register", get(register_page))
         .route("/register", post(register))
         .route("/logout", post(logout))
-        .with_state(pool) // The pool is moved here, as Router takes ownership.
+        .with_state(state)
 }
+
 
 async fn start_server(app: Router) {
     let host = env::var("SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
