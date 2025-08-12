@@ -1,12 +1,10 @@
 // src/main.rs
 use axum::{
-    middleware::{ from_fn_with_state},
-    routing::{any, get, post},
-    Router,
+    http::StatusCode, middleware::from_fn_with_state, routing::{any, get, get_service, post}, Router
 };
 use sqlx::sqlite::SqlitePool;
 use sqlx::migrate::Migrator;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use std::{env, net::SocketAddr};
 use std::sync::LazyLock; // Import LazyLock here
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -23,7 +21,7 @@ use handlers::{
 };
 use std::sync::Arc;
 
-use crate::{auth::start_cleanup_task, handlers::{login, login_page, logout, register, register_page}};
+use crate::{auth::start_cleanup_task, handlers::{login, logout, register}};
 
 // ───── 1. Constants / statics ──────────────
 // Corrected LazyLock type annotation
@@ -109,24 +107,29 @@ async fn setup_database() -> SqlitePool {
 }
 
 fn create_app_router(state: AppState) -> Router {
-    let protected_static_files_service = ServeDir::new("./public")
-        .not_found_service(any(handle_404));
+    // This service handles requests for files in the "./public" directory.
+    let spa_service = ServeDir::new("./public").not_found_service(
+        ServeFile::new("./public/index.html")
+    );
+
+    // Protected API routes that require authentication.
+    // We nest them under a `/api` path and apply the auth middleware.
+    let protected_routes = Router::new()
+        .route("/me", get(get_user_info))
+        .route("/profile", post(update_profile))
+        .layer(from_fn_with_state(state.clone(), auth_middleware));
+
+    // Public API routes for authentication and other unauthenticated endpoints.
+    let public_api_routes = Router::new()
+        .route("/login", post(login))
+        .route("/logout", post(logout));
 
     Router::new()
-        // Protected routes
-        .route("/api/user-info", get(get_user_info))
-        .route("/profile", post(update_profile))
-        .route("/api/canvases", post(create_canvas))
-        .fallback_service(protected_static_files_service)
-        .layer(from_fn_with_state(state.clone(), auth_middleware))
-        // Public routes
-        .route("/login", get(login_page))
-        .route("/login", post(login))
-        .route("/register", get(register_page))
-        .route("/register", post(register))
-        .route("/logout", post(logout))
+        .nest("/api", public_api_routes.merge(protected_routes))
+        .fallback_service(spa_service)
         .with_state(state)
 }
+
 
 
 async fn start_server(app: Router) {

@@ -1,7 +1,7 @@
 // src/handlers.rs
 use axum::{
-    extract::{State, Form},
-    http::StatusCode,
+    extract::{Form, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     Json,
 };
@@ -292,17 +292,20 @@ pub async fn update_profile(
 // ====================== login logout ======================
 
 pub async fn logout() -> impl IntoResponse {
-    let mut headers = axum::http::HeaderMap::new();
+    let mut headers = HeaderMap::new();
 
+    // Invalidate the cookie
     headers.insert(
-        axum::http::header::SET_COOKIE,
-        axum::http::HeaderValue::from_static(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
             "auth_token=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict"
         ),
     );
 
-    (headers, Redirect::to("/login")).into_response()
+    // Return a success status code and a simple JSON message
+    (StatusCode::OK, headers, Json(json!({"message": "Successfully logged out"})))
 }
+
 
 
 
@@ -314,19 +317,18 @@ pub struct LoginPayload {
 
 pub async fn login(
     State(state): State<AppState>,
-    Form(payload): Form<LoginPayload>,
+    // Change from `Form(payload)` to `Json(payload)`
+    Json(payload): Json<LoginPayload>,
 ) -> impl IntoResponse {
-    // Attempt to authorize the user and get the cookie string.
+
+    tracing::debug!("login called: user {}; pwd {}", payload.email, payload.password);
+    
     match authorize_user(&state.pool, &payload.email, &payload.password).await {
         Ok(cookie) => {
-            // If authorization is successful, create the headers with the cookie.
             let headers = create_cookie_header(cookie);
-            
-            // Return the headers along with a redirect to the home page.
-            (headers, Redirect::to("/")).into_response()
+            (StatusCode::OK, headers, Json(json!({"message": "Login successful"}))).into_response()
         }
         Err(e) => {
-            // If there's an error, convert it into an appropriate HTTP response.
             e.into_response()
         }
     }
@@ -411,22 +413,22 @@ pub async fn register(
 
 
 
-pub async fn login_page() -> impl IntoResponse {
-    match fs::read_to_string("login.html") {
-        Ok(contents) => Html(contents).into_response(),
-        Err(_) => {
-            tracing::error!("login.html not found!");
-            Html("<h1>Login page not found</h1>").into_response()
-        },
-    }
-}
+// pub async fn login_page() -> impl IntoResponse {
+//     match fs::read_to_string("login.html") {
+//         Ok(contents) => Html(contents).into_response(),
+//         Err(_) => {
+//             tracing::error!("login.html not found!");
+//             Html("<h1>Login page not found</h1>").into_response()
+//         },
+//     }
+// }
 
-pub async fn register_page() -> impl IntoResponse {
-    match fs:: read_to_string("register.html") {
-        Ok(contents) => Html(contents).into_response(),
-        Err(_) => {
-            tracing::error!("register.html not found!");
-            Html("<h1>Register page not found</h1>").into_response()
-        },
-    }
-}
+// pub async fn register_page() -> impl IntoResponse {
+//     match fs:: read_to_string("register.html") {
+//         Ok(contents) => Html(contents).into_response(),
+//         Err(_) => {
+//             tracing::error!("register.html not found!");
+//             Html("<h1>Register page not found</h1>").into_response()
+//         },
+//     }
+// }
