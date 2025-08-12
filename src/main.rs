@@ -1,6 +1,6 @@
 // src/main.rs
 use axum::{
-    http::StatusCode, middleware::from_fn_with_state, routing::{any, get, get_service, post}, Router
+    middleware::from_fn_with_state, routing::{ get, post}, Router
 };
 use sqlx::sqlite::SqlitePool;
 use sqlx::migrate::Migrator;
@@ -17,8 +17,7 @@ mod handlers;
 // Re-export types from auth and handlers for main's use
 use auth::{auth_middleware, PermissionRefreshList}; // Only need auth_middleware from auth
 use handlers::{
-    get_user_info, handle_404, update_profile, create_canvas
-};
+    get_user_info, update_profile};
 use std::sync::Arc;
 
 use crate::{auth::start_cleanup_task, handlers::{login, logout, register}};
@@ -122,7 +121,8 @@ fn create_app_router(state: AppState) -> Router {
     // Public API routes for authentication and other unauthenticated endpoints.
     let public_api_routes = Router::new()
         .route("/login", post(login))
-        .route("/logout", post(logout));
+        .route("/logout", post(logout))
+        .route("/register", post(register)); // Add the new registration route
 
     Router::new()
         .nest("/api", public_api_routes.merge(protected_routes))

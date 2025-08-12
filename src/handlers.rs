@@ -2,14 +2,13 @@
 use axum::{
     extract::{Form, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{Error as SqlxError};
 use uuid::Uuid;
-use std::{fs};
 
 // Import types and functions from the auth module
 use crate::{auth::{
@@ -20,9 +19,9 @@ use crate::{auth::{
 
 
 // ====================== 404 handler ======================
-pub async fn handle_404() -> Response {
-    (StatusCode::NOT_FOUND, "404 Not Found").into_response()
-}
+// pub async fn handle_404() -> Response {
+//     (StatusCode::NOT_FOUND, "404 Not Found").into_response()
+// }
 
 // ====================== canvas stuff ======================
 #[derive(Debug, Deserialize)]
@@ -346,7 +345,7 @@ pub struct RegisterPayload {
 
 pub async fn register(
     State(state): State<AppState>,
-    Form(payload): Form<RegisterPayload>
+    Json(payload): Json<RegisterPayload>,
 ) -> impl IntoResponse {
     if payload.email.is_empty() || payload.password.is_empty() || payload.display_name.is_empty() {
         return AuthError::MissingCredentials.into_response();
@@ -395,7 +394,8 @@ pub async fn register(
             // Build cookie header
             let headers = create_cookie_header(cookie_str);
 
-            (headers, Redirect::to("/")).into_response()
+            // Return success with the cookie header, logging the user in automatically
+            (StatusCode::CREATED, headers, Json(json!({"message": "Registration successful"}))).into_response()
         }
         Err(SqlxError::Database(db_error)) if db_error.code() == Some("2067".into()) => {
             tracing::info!("Registration failed: User {} already exists.", payload.email);
@@ -407,28 +407,3 @@ pub async fn register(
         }
     }
 }
-
-
-
-
-
-
-// pub async fn login_page() -> impl IntoResponse {
-//     match fs::read_to_string("login.html") {
-//         Ok(contents) => Html(contents).into_response(),
-//         Err(_) => {
-//             tracing::error!("login.html not found!");
-//             Html("<h1>Login page not found</h1>").into_response()
-//         },
-//     }
-// }
-
-// pub async fn register_page() -> impl IntoResponse {
-//     match fs:: read_to_string("register.html") {
-//         Ok(contents) => Html(contents).into_response(),
-//         Err(_) => {
-//             tracing::error!("register.html not found!");
-//             Html("<h1>Register page not found</h1>").into_response()
-//         },
-//     }
-// }
