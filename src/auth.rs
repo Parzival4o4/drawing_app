@@ -1,4 +1,4 @@
-use std::{collections::HashMap};
+use std::{collections::HashMap, fmt::Display};
 use axum::{
     body::Body,
     extract::{FromRequestParts, State},
@@ -36,6 +36,16 @@ pub struct Claims {
     /// Soft reissue time: absolute epoch seconds
     pub reissue_time: usize,
     pub canvas_permissions: HashMap<String, String>,
+}
+
+impl Display for Claims {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Claims {{ user_id: {}, email: {}, display_name: {} }}",
+            self.user_id, self.email, self.display_name
+        )
+    }
 }
 
 // Update the FromRequestParts implementation to return an AuthError instead of a Redirect.
@@ -157,7 +167,7 @@ pub async fn auth_middleware(
 
             // Check both soft-expire and refresh list
             let soft_expired = claims.reissue_time <= now;
-            let refresh_list_entry = refresh_list.should_refresh(claims.user_id).await;
+            let refresh_list_entry = refresh_list.consume_refresh_request(claims.user_id).await;
 
             if soft_expired || refresh_list_entry {
                 tracing::debug!(
@@ -417,13 +427,17 @@ impl PermissionRefreshList {
         let mut map = self.inner.write().await;
         map.insert(user_id, now);
     }
-    pub async fn should_refresh(&self, user_id: UserId) -> bool {
+    pub async fn consume_refresh_request(&self, user_id: UserId) -> bool {
         let mut map = self.inner.write().await;
         if map.remove(&user_id).is_some() {
             true
         } else {
             false
         }
+    }
+    pub async fn has_pending_refresh(&self, user_id: UserId) -> bool {
+        let map = self.inner.read().await;
+        map.contains_key(&user_id)
     }
     pub async fn prune_old_entries(&self, max_age: usize) {
         let now = current_timestamp();

@@ -46,4 +46,36 @@ export function logout() {
         });
     });
 }
+// --- New API calls from home.ts ---
+export function getCanvases() {
+    return __awaiter(this, void 0, void 0, function* () {
+        return fetch(`${API_BASE}/canvases/list`);
+    });
+}
+export function createCanvas(name) {
+    return __awaiter(this, void 0, void 0, function* () {
+        return fetch(`${API_BASE}/canvases/create`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+        });
+    });
+}
+export function getUserInfo() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const res = yield fetch(`${API_BASE}/me`);
+        if (!res.ok)
+            throw new Error("Failed to fetch user info");
+        return res.json();
+    });
+}
+export function updateUserInfo(email, display_name) {
+    return __awaiter(this, void 0, void 0, function* () {
+        return fetch(`${API_BASE}/user/update`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, display_name }),
+        });
+    });
+}
 //# sourceMappingURL=api.js.map

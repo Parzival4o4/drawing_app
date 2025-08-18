@@ -10,6 +10,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 import { renderLoginPage } from "./pages/login.js";
 import { renderRegisterPage } from "./pages/register.js";
 import { renderHome } from "./pages/home.js";
+import { renderCanvasDebugPage } from "./pages/canvas.js";
 import { isAuthenticated } from "./api.js";
 export function handleRoute() {
     return __awaiter(this, void 0, void 0, function* () {
@@ -19,6 +20,15 @@ export function handleRoute() {
         }
         else if (path === "/register") {
             renderRegisterPage();
+        }
+        else if (path.startsWith("/canvas/")) {
+            if (yield isAuthenticated()) {
+                const id = path.split("/")[2]; // extract the <id> part
+                renderCanvasDebugPage(id);
+            }
+            else {
+                navigateTo("/login");
+            }
         }
         else if (path === "/") {
             if (yield isAuthenticated()) {

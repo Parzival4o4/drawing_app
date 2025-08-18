@@ -4,8 +4,9 @@ use axum::{
 };
 use sqlx::sqlite::SqlitePool;
 use sqlx::migrate::Migrator;
+use tokio::sync::{Mutex, RwLock};
 use tower_http::services::{ServeDir, ServeFile};
-use std::{env, net::SocketAddr};
+use std::{collections::HashMap, env, net::SocketAddr};
 use std::sync::LazyLock; // Import LazyLock here
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use dotenvy::dotenv;
@@ -13,6 +14,7 @@ use dotenvy::dotenv;
 // Import modules
 mod auth;
 mod handlers;
+mod ws_stuff;
 
 // Re-export types from auth and handlers for main's use
 use auth::{auth_middleware, PermissionRefreshList}; // Only need auth_middleware from auth
@@ -20,7 +22,7 @@ use handlers::{
     get_user_info, update_profile};
 use std::sync::Arc;
 
-use crate::{auth::start_cleanup_task, handlers::{login, logout, register}};
+use crate::{auth::start_cleanup_task, handlers::{create_canvas, get_canvas_list, login, logout, register}, ws_stuff::{ws_handler, WebSocketConnections}};
 
 // ───── 1. Constants / statics ──────────────
 // Corrected LazyLock type annotation
@@ -37,19 +39,27 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub struct AppState {
     pub pool: SqlitePool,
     pub permission_refresh_list: Arc<PermissionRefreshList>,
+    pub active_connections: WebSocketConnections, // Updated to use the new struct
 }
+
 
 // ───── 2. Main entrypoint ──────────────────
 #[tokio::main]
 async fn main() {
-    setup_tracing();
+    // Assume setup_tracing and start_server are defined elsewhere.
+    // Replace with your actual setup functions if different.
+    let _ = setup_tracing();
 
     let pool = setup_database().await;
     let permission_refresh_list = Arc::new(PermissionRefreshList::new());
 
+    // Initialize the WebSocketConnections struct
+    let active_connections = WebSocketConnections::new();
+
     let app_state = AppState {
         pool: pool.clone(),
         permission_refresh_list: permission_refresh_list.clone(),
+        active_connections: active_connections.clone(), // Pass the new struct
     };
 
     // Spawn cleanup task for pruning entries every REISSUE_AFTER_SECONDS
@@ -115,20 +125,25 @@ fn create_app_router(state: AppState) -> Router {
     // We nest them under a `/api` path and apply the auth middleware.
     let protected_routes = Router::new()
         .route("/me", get(get_user_info))
-        .route("/profile", post(update_profile))
-        .layer(from_fn_with_state(state.clone(), auth_middleware));
+        .route("/user/update", post(update_profile))
+        .route("/canvases/create", post(create_canvas))
+        .route("/canvases/list", get(get_canvas_list))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     // Public API routes for authentication and other unauthenticated endpoints.
     let public_api_routes = Router::new()
         .route("/login", post(login))
         .route("/logout", post(logout))
-        .route("/register", post(register)); // Add the new registration route
+        .route("/register", post(register));
 
+    // Combine all routes and services into the final application router.
     Router::new()
         .nest("/api", public_api_routes.merge(protected_routes))
+        .route("/ws", get(ws_handler))
         .fallback_service(spa_service)
         .with_state(state)
 }
+
 
 
 

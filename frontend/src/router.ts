@@ -1,6 +1,7 @@
 import { renderLoginPage } from "./pages/login.js";
 import { renderRegisterPage } from "./pages/register.js";
 import { renderHome } from "./pages/home.js";
+import { renderCanvasDebugPage } from "./pages/canvas.js";
 import { isAuthenticated } from "./api.js";
 
 export async function handleRoute() {
@@ -10,6 +11,13 @@ export async function handleRoute() {
     renderLoginPage();
   } else if (path === "/register") {
     renderRegisterPage();
+  } else if (path.startsWith("/canvas/")) {
+    if (await isAuthenticated()) {
+      const id = path.split("/")[2]; // extract the <id> part
+      renderCanvasDebugPage(id);
+    } else {
+      navigateTo("/login");
+    }
   } else if (path === "/") {
     if (await isAuthenticated()) {
       renderHome();

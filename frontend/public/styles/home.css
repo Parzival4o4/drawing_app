@@ -1,7 +1,39 @@
+/* Logout button styling */
 #logout-btn {
-    background-color: darkred;
+  background-color: darkred;
+  color: white;
+  border: none;
+  padding: 8px 14px;
+  border-radius: 4px;
+  cursor: pointer;
 }
 
 #logout-btn:hover {
-    background-color: red;
+  background-color: red;
+}
+
+/* Section boxes on right side */
+.home-section {
+  border: 1px solid #ccc;
+  padding: 10px;
+  border-radius: 5px;
+  margin-bottom: 15px;
+}
+
+/* Form labels */
+.home-section label {
+  display: inline-block;
+  width: 120px;
+  white-space: nowrap;
+  font-weight: bold;
+}
+
+/* Canvas list items */
+#canvas-list li {
+  cursor: pointer;
+  padding: 5px 0;
+}
+
+#canvas-list li:hover {
+  background-color: #f0f0f0;
 }

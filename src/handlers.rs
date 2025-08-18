@@ -2,12 +2,13 @@
 use axum::{
     extract::{Form, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{IntoResponse},
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{Error as SqlxError};
+use sqlx::{Row};
 use uuid::Uuid;
 
 // Import types and functions from the auth module
@@ -24,6 +25,87 @@ use crate::{auth::{
 // }
 
 // ====================== canvas stuff ======================
+
+// A struct to represent a single canvas item in the response
+#[derive(Debug, Serialize)]
+pub struct CanvasListResponseItem {
+    pub canvas_id: String,
+    pub name: String,
+    pub permission_level: String,
+}
+
+// The handler for the GET /api/canvases/list route
+// This function will automatically have the Claims extractor run by Axum,
+// ensuring the request is authenticated before it reaches this handler.
+pub async fn get_canvas_list(
+    State(state): State<AppState>,
+    claims: Claims,
+) -> impl IntoResponse {
+    let pool = state.pool;
+
+    // The claims already contain the canvas IDs and their permission levels.
+    let canvas_permissions = claims.canvas_permissions;
+
+    // Extract the canvas IDs from the claims' HashMap.
+    let canvas_ids: Vec<&str> = canvas_permissions.keys().map(|id| id.as_str()).collect();
+    
+    // Check if there are any canvas IDs to query. If not, return an empty list immediately.
+    if canvas_ids.is_empty() {
+        return (StatusCode::OK, Json(Vec::<CanvasListResponseItem>::new())).into_response();
+    }
+
+    // The `sqlx` macro doesn't support dynamically-sized `IN` clauses directly,
+    // so we need to build the query dynamically.
+    let in_clause = format!(
+        "('{}')",
+        canvas_ids.join("','")
+    );
+
+    // SQL query to fetch the canvas name for each canvas_id
+    let query_string = format!(
+        "SELECT canvas_id, name FROM Canvas WHERE canvas_id IN {}",
+        in_clause
+    );
+
+    let canvas_rows = match sqlx::query(&query_string)
+        .fetch_all(&pool) // Fix: Changed &*pool to &pool. The pool is already a reference.
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("Database query failed: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to retrieve canvas list."}))
+            ).into_response();
+        }
+    };
+    
+    // Build the final list of canvases to return.
+    let mut response_list: Vec<CanvasListResponseItem> = Vec::new();
+
+    for row in canvas_rows {
+        let canvas_id: String = row.get("canvas_id");
+        let name: String = row.get("name");
+        
+        // Find the permission level in the claims HashMap.
+        // It's safe to unwrap here because the query was built from the keys of this map.
+        let permission_level = canvas_permissions.get(&canvas_id).unwrap().clone();
+
+        response_list.push(CanvasListResponseItem {
+            canvas_id,
+            name,
+            permission_level,
+        });
+    }
+
+    (
+        StatusCode::OK,
+        Json(response_list)
+    ).into_response()
+}
+
+
 #[derive(Debug, Deserialize)]
 pub struct CreateCanvasPayload {
     pub name: String,
@@ -33,7 +115,7 @@ pub struct CreateCanvasPayload {
 pub async fn create_canvas(
     State(state): State<AppState>,
     claims: Claims, // User who is creating the canvas (owner)
-    Form(payload): Form<CreateCanvasPayload>, // Name of the new canvas
+    Json(payload): Json<CreateCanvasPayload>, // Name of the new canvas, now from JSON
 ) -> impl IntoResponse {
 
     let pool = state.pool;
@@ -118,8 +200,11 @@ pub async fn create_canvas(
             return AuthError::DbError.into_response();
         }
     };
+    
+    // Step 2: Update the claims in the active WebSocket connections
+    state.active_connections.update_user_claims(claims.user_id, updated_claims.clone()).await;
 
-    // Step 2: Create new cookie from updated claims
+    // Step 3: Create new cookie from updated claims
     match get_cookie_from_claims(updated_claims).await {
         Ok(cookie) => {
             let headers = create_cookie_header(cookie);
@@ -159,8 +244,8 @@ pub struct UpdateUserPayload {
 
 pub async fn update_profile(
     State(state): State<AppState>,
-    claims: Claims, // Extracted by auth_middleware and FromRequestParts
-    Form(payload): Form<UpdateUserPayload>, // New payload for updates
+    claims: Claims,
+    Json(payload): Json<UpdateUserPayload>, // Changed to accept a JSON payload
 ) -> impl IntoResponse {
 
     let pool = state.pool;
@@ -257,7 +342,7 @@ pub async fn update_profile(
         email: updated_email.clone(),
         display_name: Some(updated_display_name.clone()),
         user_id: Some(claims.user_id),
-        canvas_permissions: Some(claims.canvas_permissions.clone()), // Keep existing permissions
+        canvas_permissions: Some(claims.canvas_permissions.clone()),
         exp: claims.exp,
     };
 
@@ -270,7 +355,10 @@ pub async fn update_profile(
         }
     };
 
-    // Step 3: Create new cookie from updated claims
+    // Step 3: Update claims in active WebSocket connections
+    state.active_connections.update_user_claims(claims.user_id, updated_claims.clone()).await;
+
+    // Step 4: Create new cookie from updated claims
     match get_cookie_from_claims(updated_claims).await {
         Ok(cookie) => {
             let headers = create_cookie_header(cookie);
