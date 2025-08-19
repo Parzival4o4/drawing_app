@@ -157,6 +157,6 @@ async fn start_server(app: Router) {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap();
-    tracing::info!("listening on {}", listener.local_addr().unwrap());
+    tracing::info!("listening on http://{}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
 }

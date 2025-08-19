@@ -1,47 +1,36 @@
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
 import { renderLoginPage } from "./pages/login.js";
 import { renderRegisterPage } from "./pages/register.js";
 import { renderHome } from "./pages/home.js";
-import { renderCanvasDebugPage } from "./pages/canvas.js";
+import { renderCanvasPage } from "./pages/canvas.js";
 import { isAuthenticated } from "./api.js";
-export function handleRoute() {
-    return __awaiter(this, void 0, void 0, function* () {
-        const path = window.location.pathname;
-        if (path === "/login") {
-            renderLoginPage();
-        }
-        else if (path === "/register") {
-            renderRegisterPage();
-        }
-        else if (path.startsWith("/canvas/")) {
-            if (yield isAuthenticated()) {
-                const id = path.split("/")[2]; // extract the <id> part
-                renderCanvasDebugPage(id);
-            }
-            else {
-                navigateTo("/login");
-            }
-        }
-        else if (path === "/") {
-            if (yield isAuthenticated()) {
-                renderHome();
-            }
-            else {
-                navigateTo("/login");
-            }
+export async function handleRoute() {
+    const path = window.location.pathname;
+    if (path === "/login") {
+        renderLoginPage();
+    }
+    else if (path === "/register") {
+        renderRegisterPage();
+    }
+    else if (path.startsWith("/canvas/")) {
+        if (await isAuthenticated()) {
+            const id = path.split("/")[2]; // extract the <id> part
+            renderCanvasPage(id);
         }
         else {
-            navigateTo("/");
+            navigateTo("/login");
         }
-    });
+    }
+    else if (path === "/") {
+        if (await isAuthenticated()) {
+            renderHome();
+        }
+        else {
+            navigateTo("/login");
+        }
+    }
+    else {
+        navigateTo("/");
+    }
 }
 export function navigateTo(path) {
     history.pushState(null, "", path);

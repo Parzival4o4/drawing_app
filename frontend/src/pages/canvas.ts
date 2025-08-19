@@ -1,99 +1,47 @@
-import { logout } from "../api.js";
+// src/pages/canvas.ts
 import { navigateTo } from "../router.js";
 
-let ws: WebSocket | null = null;
-
-export function renderCanvasDebugPage(id: string) {
+export function renderCanvasPage(canvasId: string) {
   const app = document.getElementById("app")!;
   app.innerHTML = `
-    <h2>WebSocket Debug Page</h2>
-    <p>Testing canvas session with ID: <strong>${id}</strong></p>
-    <div style="display: flex; gap: 10px; margin-bottom: 20px;">
-      <button id="connect-btn">Connect to WebSocket</button>
-      <button id="send-msg-btn" disabled>Send Test Message</button>
+    <h2>Canvas</h2>
+    <div style="display: flex; gap: 20px;">
+      <!-- Tools sidebar -->
+      <div style="flex: 0 0 200px; border-right: 1px solid #ccc; padding-right: 10px;">
+        <button id="home-btn" class="nav-btn">🏠 Home</button>
+        <h3>Tools</h3>
+        <div class="tools"></div>
+      </div>
+
+      <!-- Drawing area -->
+      <div style="flex: 1; padding-left: 10px;">
+        <canvas id="drawArea" width="1024" height="768"></canvas>
+
+        <!-- Hidden UI expected by drawer.ts -->
+        <textarea id="textarea" cols="130" rows="20" name="event_log" style="display:none;"></textarea>
+        <button id="button" type="button" style="display:none;">Load</button>
+      </div>
     </div>
-    <button id="logout-btn">Logout</button>
-    <h3>Server Messages:</h3>
-    <pre id="messages"></pre>
-    <p><a href="/" id="link-home">← Back to Home</a></p>
   `;
 
-  const connectBtn = document.getElementById("connect-btn") as HTMLButtonElement;
-  const sendBtn = document.getElementById("send-msg-btn") as HTMLButtonElement;
-  const logoutBtn = document.getElementById("logout-btn") as HTMLButtonElement;
-  const messagesPre = document.getElementById("messages") as HTMLPreElement;
-
-  const logMessage = (msg: string) => {
-    messagesPre.textContent += `${msg}\n`;
-    messagesPre.scrollTop = messagesPre.scrollHeight;
-  };
-
-  const connectToWebSocket = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      logMessage("WebSocket is already connected.");
-      return;
-    }
-
-    const wsUrl = `ws://${window.location.host}/ws`;
-    logMessage(`Attempting to connect to ${wsUrl}...`);
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      logMessage("Connection established!");
-      sendBtn.disabled = false;
-      connectBtn.disabled = true;
-    };
-
-    ws.onmessage = (event) => {
-      logMessage(`Received: ${event.data}`);
-    };
-
-    ws.onclose = (event) => {
-      logMessage(`Connection closed. Code: ${event.code}, Reason: ${event.reason}`);
-      sendBtn.disabled = true;
-      connectBtn.disabled = false;
-      ws = null;
-    };
-
-    ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-      logMessage("WebSocket error occurred. Check console for details.");
-      sendBtn.disabled = true;
-      connectBtn.disabled = false;
-    };
-  };
-
-  connectBtn.addEventListener("click", connectToWebSocket);
-
-  sendBtn.addEventListener("click", () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      const message = "hello backend";
-      ws.send(message);
-      logMessage(`Sent: ${message}`);
-    } else {
-      logMessage("WebSocket is not open. Please connect first.");
-    }
-  });
-
-  logoutBtn.addEventListener("click", async () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close();
-    }
-
-    try {
-      const res = await logout();
-      if (res.ok) {
-        navigateTo("/login");
-      } else {
-        alert("Logout failed");
-      }
-    } catch {
-      alert("Network error");
-    }
-  });
-
-  document.getElementById("link-home")?.addEventListener("click", (e) => {
-    e.preventDefault();
+  // Navigate back home
+  document.getElementById("home-btn")?.addEventListener("click", () => {
     navigateTo("/");
   });
+
+  // Load drawer setup
+  import("./drawer/drawer.js")
+    .then((mod) => {
+      if (typeof mod.setupDrawer === "function") {
+        const canvasElm = document.getElementById("drawArea") as HTMLCanvasElement;
+        const toolsElm = document.querySelector(".tools") as HTMLElement;
+        const textAreaElm = document.getElementById("textarea") as HTMLTextAreaElement;
+        const buttonElm = document.getElementById("button") as HTMLButtonElement;
+
+        mod.setupDrawer(canvasElm, toolsElm, textAreaElm, buttonElm);
+      }
+    })
+    .catch((err) => {
+      console.error("Failed to load drawer:", err);
+    });
 }

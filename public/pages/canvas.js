@@ -1,98 +1,44 @@
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
-import { logout } from "../api.js";
+// src/pages/canvas.ts
 import { navigateTo } from "../router.js";
-let ws = null;
-export function renderCanvasDebugPage(id) {
-    var _a;
+export function renderCanvasPage(canvasId) {
     const app = document.getElementById("app");
     app.innerHTML = `
-    <h2>WebSocket Debug Page</h2>
-    <p>Testing canvas session with ID: <strong>${id}</strong></p>
-    <div style="display: flex; gap: 10px; margin-bottom: 20px;">
-      <button id="connect-btn">Connect to WebSocket</button>
-      <button id="send-msg-btn" disabled>Send Test Message</button>
+    <h2>Canvas</h2>
+    <div style="display: flex; gap: 20px;">
+      <!-- Tools sidebar -->
+      <div style="flex: 0 0 200px; border-right: 1px solid #ccc; padding-right: 10px;">
+        <button id="home-btn" class="nav-btn">🏠 Home</button>
+        <h3>Tools</h3>
+        <div class="tools"></div>
+      </div>
+
+      <!-- Drawing area -->
+      <div style="flex: 1; padding-left: 10px;">
+        <canvas id="drawArea" width="1024" height="768"></canvas>
+
+        <!-- Hidden UI expected by drawer.ts -->
+        <textarea id="textarea" cols="130" rows="20" name="event_log" style="display:none;"></textarea>
+        <button id="button" type="button" style="display:none;">Load</button>
+      </div>
     </div>
-    <button id="logout-btn">Logout</button>
-    <h3>Server Messages:</h3>
-    <pre id="messages"></pre>
-    <p><a href="/" id="link-home">← Back to Home</a></p>
   `;
-    const connectBtn = document.getElementById("connect-btn");
-    const sendBtn = document.getElementById("send-msg-btn");
-    const logoutBtn = document.getElementById("logout-btn");
-    const messagesPre = document.getElementById("messages");
-    const logMessage = (msg) => {
-        messagesPre.textContent += `${msg}\n`;
-        messagesPre.scrollTop = messagesPre.scrollHeight;
-    };
-    const connectToWebSocket = () => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            logMessage("WebSocket is already connected.");
-            return;
-        }
-        const wsUrl = `ws://${window.location.host}/ws`;
-        logMessage(`Attempting to connect to ${wsUrl}...`);
-        ws = new WebSocket(wsUrl);
-        ws.onopen = () => {
-            logMessage("Connection established!");
-            sendBtn.disabled = false;
-            connectBtn.disabled = true;
-        };
-        ws.onmessage = (event) => {
-            logMessage(`Received: ${event.data}`);
-        };
-        ws.onclose = (event) => {
-            logMessage(`Connection closed. Code: ${event.code}, Reason: ${event.reason}`);
-            sendBtn.disabled = true;
-            connectBtn.disabled = false;
-            ws = null;
-        };
-        ws.onerror = (error) => {
-            console.error("WebSocket error:", error);
-            logMessage("WebSocket error occurred. Check console for details.");
-            sendBtn.disabled = true;
-            connectBtn.disabled = false;
-        };
-    };
-    connectBtn.addEventListener("click", connectToWebSocket);
-    sendBtn.addEventListener("click", () => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            const message = "hello backend";
-            ws.send(message);
-            logMessage(`Sent: ${message}`);
-        }
-        else {
-            logMessage("WebSocket is not open. Please connect first.");
-        }
-    });
-    logoutBtn.addEventListener("click", () => __awaiter(this, void 0, void 0, function* () {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.close();
-        }
-        try {
-            const res = yield logout();
-            if (res.ok) {
-                navigateTo("/login");
-            }
-            else {
-                alert("Logout failed");
-            }
-        }
-        catch (_a) {
-            alert("Network error");
-        }
-    }));
-    (_a = document.getElementById("link-home")) === null || _a === void 0 ? void 0 : _a.addEventListener("click", (e) => {
-        e.preventDefault();
+    // Navigate back home
+    document.getElementById("home-btn")?.addEventListener("click", () => {
         navigateTo("/");
+    });
+    // Load drawer setup
+    import("./drawer/drawer.js")
+        .then((mod) => {
+        if (typeof mod.setupDrawer === "function") {
+            const canvasElm = document.getElementById("drawArea");
+            const toolsElm = document.querySelector(".tools");
+            const textAreaElm = document.getElementById("textarea");
+            const buttonElm = document.getElementById("button");
+            mod.setupDrawer(canvasElm, toolsElm, textAreaElm, buttonElm);
+        }
+    })
+        .catch((err) => {
+        console.error("Failed to load drawer:", err);
     });
 }
 //# sourceMappingURL=canvas.js.map

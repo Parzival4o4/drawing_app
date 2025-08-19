@@ -1,12 +1,3 @@
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
 import { createCanvas, getCanvases, getUserInfo, logout, updateUserInfo } from "../api.js";
 import { navigateTo } from "../router.js";
 // === Helper to map permissions ===
@@ -76,14 +67,14 @@ export function renderHome() {
     const updateDisplay = document.getElementById("user-display");
     const updateMsg = document.getElementById("update-user-msg");
     // === Fetch canvases from backend ===
-    const loadCanvases = () => __awaiter(this, void 0, void 0, function* () {
+    const loadCanvases = async () => {
         try {
-            const res = yield getCanvases();
+            const res = await getCanvases();
             if (!res.ok) {
                 canvasList.innerHTML = `<li>Failed to load canvases.</li>`;
                 return;
             }
-            const canvases = yield res.json();
+            const canvases = await res.json();
             canvasList.innerHTML = canvases.length
                 ? ""
                 : `<li>No canvases available.</li>`;
@@ -110,35 +101,35 @@ export function renderHome() {
             console.error(err);
             canvasList.innerHTML = `<li>Network error while loading canvases.</li>`;
         }
-    });
+    };
     loadCanvases();
     // === Prefill user info ===
-    const loadUserInfo = () => __awaiter(this, void 0, void 0, function* () {
+    const loadUserInfo = async () => {
         try {
-            const user = yield getUserInfo();
+            const user = await getUserInfo();
             updateEmail.value = user.email;
             updateDisplay.value = user.display_name;
         }
         catch (err) {
             console.error(err);
         }
-    });
+    };
     loadUserInfo();
     // === Logout ===
-    logoutBtn.addEventListener("click", () => __awaiter(this, void 0, void 0, function* () {
+    logoutBtn.addEventListener("click", async () => {
         try {
-            const res = yield logout();
+            const res = await logout();
             if (res.ok)
                 navigateTo("/login");
             else
                 alert("Logout failed");
         }
-        catch (_a) {
+        catch {
             alert("Network error");
         }
-    }));
+    });
     // === Create new canvas ===
-    createBtn.addEventListener("click", () => __awaiter(this, void 0, void 0, function* () {
+    createBtn.addEventListener("click", async () => {
         const name = createInput.value.trim();
         if (!name) {
             createMsg.style.color = "red";
@@ -146,7 +137,7 @@ export function renderHome() {
             return;
         }
         try {
-            const res = yield createCanvas(name);
+            const res = await createCanvas(name);
             if (res.ok) {
                 createMsg.style.color = "green";
                 createMsg.textContent = "Canvas created!";
@@ -154,18 +145,18 @@ export function renderHome() {
                 loadCanvases();
             }
             else {
-                const err = yield res.text();
+                const err = await res.text();
                 createMsg.style.color = "red";
                 createMsg.textContent = `Failed: ${err}`;
             }
         }
-        catch (_a) {
+        catch {
             createMsg.style.color = "red";
             createMsg.textContent = "Network error.";
         }
-    }));
+    });
     // === Update user info ===
-    updateBtn.addEventListener("click", () => __awaiter(this, void 0, void 0, function* () {
+    updateBtn.addEventListener("click", async () => {
         const email = updateEmail.value.trim();
         const display_name = updateDisplay.value.trim();
         if (!email && !display_name) {
@@ -174,21 +165,21 @@ export function renderHome() {
             return;
         }
         try {
-            const res = yield updateUserInfo(email, display_name);
+            const res = await updateUserInfo(email, display_name);
             if (res.ok) {
                 updateMsg.style.color = "green";
                 updateMsg.textContent = "User info updated!";
             }
             else {
-                const err = yield res.text();
+                const err = await res.text();
                 updateMsg.style.color = "red";
                 updateMsg.textContent = `Failed: ${err}`;
             }
         }
-        catch (_a) {
+        catch {
             updateMsg.style.color = "red";
             updateMsg.textContent = "Network error.";
         }
-    }));
+    });
 }
 //# sourceMappingURL=home.js.map
