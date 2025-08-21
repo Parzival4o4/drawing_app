@@ -41,10 +41,15 @@ export async function createCanvas(name) {
     });
 }
 export async function getUserInfo() {
-    const res = await fetch(`${API_BASE}/me`);
-    if (!res.ok)
-        throw new Error("Failed to fetch user info");
-    return res.json();
+    try {
+        const res = await fetch(`${API_BASE}/me`, { credentials: "include" });
+        if (!res.ok)
+            return null;
+        return await res.json();
+    }
+    catch {
+        return null;
+    }
 }
 export async function updateUserInfo(email, display_name) {
     return fetch(`${API_BASE}/user/update`, {

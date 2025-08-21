@@ -1,7 +1,7 @@
 // src/pages/canvas.ts
 import { navigateTo } from "../router.js";
 
-export function renderCanvasPage(canvasId: string) {
+export function renderCanvasPage(canvasId: string, userId: string) {
   const app = document.getElementById("app")!;
   app.innerHTML = `
     <h2>Canvas</h2>
@@ -15,11 +15,14 @@ export function renderCanvasPage(canvasId: string) {
 
       <!-- Drawing area -->
       <div style="flex: 1; padding-left: 10px;">
-        <canvas id="drawArea" width="1024" height="768"></canvas>
+        <canvas id="drawArea" width="1024" height="768" style="border:1px solid #ccc;"></canvas>
 
-        <!-- Hidden UI expected by drawer.ts -->
-        <textarea id="textarea" cols="130" rows="20" name="event_log" style="display:none;"></textarea>
-        <button id="button" type="button" style="display:none;">Load</button>
+        <!-- Event log UI -->
+        <div style="margin-top: 10px;">
+          <textarea id="textarea" cols="130" rows="10" name="event_log"></textarea>
+          <br/>
+          <button id="button" type="button">Load</button>
+        </div>
       </div>
     </div>
   `;
@@ -38,7 +41,7 @@ export function renderCanvasPage(canvasId: string) {
         const textAreaElm = document.getElementById("textarea") as HTMLTextAreaElement;
         const buttonElm = document.getElementById("button") as HTMLButtonElement;
 
-        mod.setupDrawer(canvasElm, toolsElm, textAreaElm, buttonElm);
+        mod.setupDrawer(canvasElm, toolsElm, textAreaElm, buttonElm, canvasId, userId);
       }
     })
     .catch((err) => {

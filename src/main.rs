@@ -1,12 +1,11 @@
 // src/main.rs
 use axum::{
-    middleware::from_fn_with_state, routing::{ get, post}, Router
+    routing::{ get, post}, Router
 };
 use sqlx::sqlite::SqlitePool;
 use sqlx::migrate::Migrator;
-use tokio::sync::{Mutex, RwLock};
 use tower_http::services::{ServeDir, ServeFile};
-use std::{collections::HashMap, env, net::SocketAddr};
+use std::{env, net::SocketAddr};
 use std::sync::LazyLock; // Import LazyLock here
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use dotenvy::dotenv;
@@ -22,7 +21,7 @@ use handlers::{
     get_user_info, update_profile};
 use std::sync::Arc;
 
-use crate::{auth::start_cleanup_task, handlers::{create_canvas, get_canvas_list, login, logout, register}, ws_stuff::{ws_handler, WebSocketConnections}};
+use crate::{auth::start_cleanup_task, handlers::{create_canvas, get_canvas_list, login, logout, register}, ws_stuff::{ws_handler, CanvasManager, WebSocketConnections}};
 
 // ───── 1. Constants / statics ──────────────
 // Corrected LazyLock type annotation
@@ -39,34 +38,31 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub struct AppState {
     pub pool: SqlitePool,
     pub permission_refresh_list: Arc<PermissionRefreshList>,
-    pub active_connections: WebSocketConnections, // Updated to use the new struct
+    pub active_connections: WebSocketConnections,
+    pub canvas_manager: CanvasManager,
 }
 
-
-// ───── 2. Main entrypoint ──────────────────
+// ───── Main entrypoint ──────────────────
 #[tokio::main]
 async fn main() {
-    // Assume setup_tracing and start_server are defined elsewhere.
-    // Replace with your actual setup functions if different.
     let _ = setup_tracing();
-
     let pool = setup_database().await;
     let permission_refresh_list = Arc::new(PermissionRefreshList::new());
 
-    // Initialize the WebSocketConnections struct
+    // Initialize the WebSocketConnections and CanvasManager structs
     let active_connections = WebSocketConnections::new();
+    let canvas_manager = CanvasManager::new();
 
     let app_state = AppState {
         pool: pool.clone(),
         permission_refresh_list: permission_refresh_list.clone(),
-        active_connections: active_connections.clone(), // Pass the new struct
+        active_connections: active_connections.clone(),
+        canvas_manager: canvas_manager.clone(),
     };
 
-    // Spawn cleanup task for pruning entries every REISSUE_AFTER_SECONDS
     tokio::spawn(start_cleanup_task(permission_refresh_list.clone()));
 
     let app = create_app_router(app_state);
-
     start_server(app).await;
 }
 

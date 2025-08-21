@@ -2,24 +2,31 @@
 // Add these imports to your handlers.rs
 use axum::{extract::{ws::{Message, WebSocket}, State, WebSocketUpgrade}, response::IntoResponse};
 use futures::StreamExt;
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{mpsc,  RwLock};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
+use tokio::sync::{mpsc, RwLock};
 use crate::auth::{get_claims, Claims, PartialClaims};
 use crate::AppState; // Import AppState
-use tokio::time::{interval, Duration};
 use futures::SinkExt;
+use serde::{Deserialize, Serialize};
 
+// ============================= Command Struct =============================
 
+#[derive(Serialize, Deserialize)]
+pub struct WebSocketCommand {
+    pub command: String,
+    #[serde(rename = "canvasId")]
+    pub canvas_id: Option<String>,
+    // TODO add other fields as needed for specific commands like "draw"
+}
+
+// ============================= active connections =============================
 
 // A struct to hold the sender and the claims for each connection.
-// This is the "wrapped connection" you were thinking of.
 #[derive(Debug)]
 pub struct WebSocketConnection {
     pub user_claims: Claims,
-    // Using a channel sender to send messages from other parts of the application
-    // to this specific connection. This is a robust alternative to storing SplitSink directly.
     pub message_sender: mpsc::Sender<Message>,
-    // TODO add a list of subscibed canvases
+    pub subscribed_canvases: HashSet<String>,
 }
 
 // New struct to encapsulate the active connections and their management logic
@@ -43,7 +50,6 @@ impl WebSocketConnections {
             conn.user_claims = updated_claims;
             tracing::info!("Updated claims for user {} in active connections.", user_id);
             true
-            // TODO check if the premissions on subsicbed canvases need to be changed. 
         } else {
             tracing::debug!("User {} not found in active connections. No claims to update.", user_id);
             false
@@ -52,9 +58,108 @@ impl WebSocketConnections {
 }
 
 
-// The ws_handler is now the entry point for the router.
-// It receives the WebSocketUpgrade and Claims from the Axum extractors.
-// This is the correct signature for a router handler.
+// ============================= canvas subscriptions =============================
+
+// New struct to manage a single canvas's subscribers and state
+#[derive(Debug)]
+pub struct CanvasState {
+    pub is_moderated: bool,
+    // A list of subscribed user IDs.
+    pub subscribers: HashSet<i64>,
+}
+
+// A new struct to encapsulate all canvas subscriptions
+#[derive(Clone)]
+pub struct CanvasManager {
+    // A map from canvas UUID to the CanvasState
+    pub inner: Arc<RwLock<HashMap<String, CanvasState>>>,
+}
+
+impl CanvasManager {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn get_permission(&self, user_id: i64, canvas_uuid: &str, state: &AppState) -> Option<String> {
+        let active_connections = state.active_connections.inner.read().await;
+        if let Some(conn) = active_connections.get(&user_id) {
+            conn.user_claims.canvas_permissions.get(canvas_uuid).cloned()
+        } else {
+            None
+        }
+    }
+
+    pub async fn register_for_canvas(&self, state: &AppState, user_id: i64, canvas_uuid: String) -> Result<(), String> {
+        // 1. Check if the client has permissions
+        let permission = self.get_permission(user_id, &canvas_uuid, state).await;
+        if permission.is_none() {
+            return Err("Permission denied".to_string());
+        }
+
+        // 2. Add the canvas to the WebSocketConnection's list
+        let mut active_connections_lock = state.active_connections.inner.write().await;
+        if let Some(conn) = active_connections_lock.get_mut(&user_id) {
+            conn.subscribed_canvases.insert(canvas_uuid.clone());
+        } else {
+            return Err("User's connection not found".to_string());
+        }
+
+        // 3. Update the CanvasManager
+        let mut canvas_manager_lock = self.inner.write().await;
+        let canvas_state = canvas_manager_lock
+            .entry(canvas_uuid)
+            .or_insert_with(|| CanvasState {
+                is_moderated: false,
+                subscribers: HashSet::new(),
+            });
+
+        // Add the user to the canvas subscribers
+        canvas_state.subscribers.insert(user_id);
+
+        Ok(())
+    }
+
+    pub async fn broadcast_to_canvas(&self, state: &AppState, sender_id: i64, canvas_uuid: String, message: Message) {
+        // Check if the sender has permission to draw on the canvas
+        let permission = self.get_permission(sender_id, &canvas_uuid, state).await;
+        let can_draw = match permission.as_deref() {
+            Some("W") | Some("V") | Some("M") | Some("O") | Some("C") => true,
+            _ => false,
+        };
+        
+        // Check for moderated state for "W" permission
+        let is_moderated = {
+            let canvas_manager_lock = self.inner.read().await;
+            canvas_manager_lock.get(&canvas_uuid).map_or(false, |cs| cs.is_moderated)
+        };
+        
+        if !can_draw || (is_moderated && matches!(permission.as_deref(), Some("W"))) {
+            tracing::warn!("User {} tried to draw on canvas {} without sufficient permission or due to moderation.", sender_id, canvas_uuid);
+            // TODO: send a specific error message back to the sender
+            return;
+        }
+
+        let canvas_manager_lock = self.inner.read().await;
+        if let Some(canvas_state) = canvas_manager_lock.get(&canvas_uuid) {
+            let active_connections_lock = state.active_connections.inner.read().await;
+            for &subscriber_id in &canvas_state.subscribers {
+                if subscriber_id != sender_id {
+                    if let Some(conn) = active_connections_lock.get(&subscriber_id) {
+                        if let Err(e) = conn.message_sender.send(message.clone()).await {
+                            tracing::error!("Failed to send broadcast to user {}: {}", subscriber_id, e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+// ============================= handlers =============================
+
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     mut claims: Claims,
@@ -63,13 +168,9 @@ pub async fn ws_handler(
 
     let now = jsonwebtoken::get_current_timestamp() as usize;
 
-    // Check if the JWT is soft-expired or on the refresh list.
-    // Use `should_refresh_no_remove` for this check to avoid removing the entry from the list
-    // if a full HTTP request refresh hasn't occurred yet.
     let soft_expired = claims.reissue_time <= now;
     let refresh_list_entry = state.permission_refresh_list.has_pending_refresh(claims.user_id).await;
-    
-    // If the token is soft-expired or needs a refresh, get the latest claims from the DB.
+
     if soft_expired || refresh_list_entry {
         tracing::debug!(
             "WebSocket token for user {} needs refresh. soft_expired: {}, refresh_list_entry: {}",
@@ -78,7 +179,7 @@ pub async fn ws_handler(
 
         let partial_claims = PartialClaims{
             email: claims.email.clone(),
-            user_id: Some(claims.user_id), 
+            user_id: Some(claims.user_id),
             display_name: Some(claims.display_name.clone()),
             ..PartialClaims::default()
         };
@@ -90,8 +191,6 @@ pub async fn ws_handler(
             }
             Err(e) => {
                 tracing::warn!("Failed to refresh claims for WebSocket user {}: {:?}", claims.user_id, e);
-                // Return an error response, preventing the WebSocket from being established
-                // with outdated claims.
                 return axum::response::Response::builder()
                     .status(axum::http::StatusCode::UNAUTHORIZED)
                     .body(axum::body::Body::empty())
@@ -104,59 +203,69 @@ pub async fn ws_handler(
     let user_id = claims.user_id;
     tracing::debug!("Upgrading WebSocket connection for user {}", user_id);
 
-    // Use on_upgrade to handle the actual WebSocket connection.
-    // We pass the claims and state to the new handler function.
     ws.on_upgrade(move |socket| handle_websocket(socket, claims, state))
 }
 
 
-// The actual logic for handling the WebSocket connection is now in this separate function.
-// It receives a WebSocket (after the upgrade) and the Claims, as it needs.
 async fn handle_websocket(socket: WebSocket, claims: Claims, state: AppState) {
     let user_id = claims.user_id;
     let (mut sender, mut receiver) = socket.split();
 
-    // Create a channel for internal message passing to this connection.
     let (tx, mut rx) = mpsc::channel::<Message>(128);
 
-    // Add the connection to the Active Connections map
     let wrapped_connection = WebSocketConnection {
         user_claims: claims,
         message_sender: tx,
+        subscribed_canvases: HashSet::new(),
     };
     state.active_connections.inner.write().await.insert(user_id, wrapped_connection);
-    
-    // A separate task to handle sending messages from the mpsc channel
-    let mut sender_task = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            if let Err(e) = sender.send(message).await {
-                tracing::error!("Failed to send message to user {}: {}", user_id, e);
-                break;
-            }
-        }
-    });
 
     tracing::info!("User {} connected via WebSocket.", user_id);
 
-    // Timer for periodic server-to-client messages (for testing)
-    let mut periodic_timer = interval(Duration::from_secs(10));
-    periodic_timer.tick().await;
+    // Call a helper function to handle the loop
+    handle_incoming_messages(user_id, &mut receiver, &state).await;
+    
+    // Unsubscription and cleanup logic after the loop exits
+    tracing::info!("User {}'s WebSocket connection closed. Removing from maps.", user_id);
 
+    let subscribed_canvases_to_remove: Vec<String> = {
+        let active_connections_lock = state.active_connections.inner.read().await;
+        if let Some(conn) = active_connections_lock.get(&user_id) {
+            conn.subscribed_canvases.iter().cloned().collect()
+        } else {
+            vec![]
+        }
+    };
+
+    let mut canvas_manager_lock = state.canvas_manager.inner.write().await;
+    for canvas_uuid in subscribed_canvases_to_remove {
+        if let Some(canvas_state) = canvas_manager_lock.get_mut(&canvas_uuid) {
+            canvas_state.subscribers.remove(&user_id);
+            if canvas_state.subscribers.is_empty() {
+                canvas_manager_lock.remove(&canvas_uuid);
+                tracing::info!("Canvas {} removed from manager as it is now empty.", canvas_uuid);
+            }
+        }
+    }
+    
+    state.active_connections.inner.write().await.remove(&user_id);
+    
+    tracing::info!("User {}'s WebSocket connection cleanup complete.", user_id);
+}
+
+// New helper function to encapsulate the loop logic
+async fn handle_incoming_messages(user_id: i64, receiver: &mut futures::stream::SplitStream<WebSocket>, state: &AppState) {
     loop {
         tokio::select! {
-            // Case 1: Handle incoming messages from the client.
             Some(Ok(message)) = receiver.next() => {
                 match message {
                     Message::Text(text) => {
-                        // Get the current claims from the map before logging
-                        let active_connections_lock = state.active_connections.inner.read().await;
-                        if let Some(conn) = active_connections_lock.get(&user_id) {
-                            tracing::info!(
-                                "Received message from user {}: {} with claims {:?}",
-                                user_id, text, conn.user_claims
-                            );
-                        } else {
-                            tracing::warn!("Received message from user not in active connections map: {}", user_id);
+                        // We clone here to pass ownership to the new function,
+                        // while keeping the original string for potential reuse below.
+                        // This resolves the first error.
+                        if let Err(e) = process_command(user_id, text.to_string(), state).await {
+                            tracing::error!("Failed to process command for user {}: {}", user_id, e);
+                            // TODO: Consider sending an error message back to the client
                         }
                     }
                     Message::Close(_) => {
@@ -166,35 +275,43 @@ async fn handle_websocket(socket: WebSocket, claims: Claims, state: AppState) {
                     _ => {}
                 }
             }
-            
-            // Case 2: Handle periodic messages from the server.
-            _ = periodic_timer.tick() => {
-                let message = Message::Text("hello client".to_string().into());
-                let active_connections_lock = state.active_connections.inner.read().await;
-                if let Some(conn) = active_connections_lock.get(&user_id) {
-                    tracing::info!(
-                        "Sending periodic message to user {} with claims {:?}",
-                        user_id, conn.user_claims
-                    );
-                    if let Err(e) = conn.message_sender.send(message).await {
-                        tracing::error!("Failed to send message via channel to user {}: {}. Exiting loop.", user_id, e);
-                        break;
-                    }
-                } else {
-                    tracing::warn!("Periodic message for user {} failed. User not in map.", user_id);
-                }
-            }
-            
-            // This ensures the loop exits if all streams are exhausted
             else => {
                 break;
             }
         }
     }
-    
-    // Remove the connection from the map when the loop exits.
-    tracing::info!("User {}'s WebSocket connection closed. Removing from map.", user_id);
-    state.active_connections.inner.write().await.remove(&user_id);
-    
-    tracing::info!("User {}'s WebSocket connection closed.", user_id);
+}
+
+// New helper function to process a single command
+async fn process_command(user_id: i64, text: String, state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let command: WebSocketCommand = serde_json::from_str(&text)?;
+
+    match command.command.as_str() {
+        "registerForCanvas" => {
+            if let Some(canvas_uuid) = command.canvas_id {
+                tracing::info!("User {} wants to subscribe to canvas {}", user_id, canvas_uuid);
+                state.canvas_manager.register_for_canvas(state, user_id, canvas_uuid).await?;
+                tracing::info!("User {} successfully subscribed to canvas", user_id);
+            }
+        }
+        "draw" => {
+            if let Some(canvas_uuid) = command.canvas_id {
+                let active_connections_lock = state.active_connections.inner.read().await;
+                if let Some(conn) = active_connections_lock.get(&user_id) {
+                    if conn.subscribed_canvases.contains(&canvas_uuid) {
+                        // The compiler suggested this, as the `Message::Text` variant
+                        // takes ownership of its argument, which we now own.
+                        state.canvas_manager.broadcast_to_canvas(state, user_id, canvas_uuid, Message::Text(text.into())).await;
+                    } else {
+                        tracing::warn!("User {} tried to draw on a canvas they are not subscribed to: {}", user_id, canvas_uuid);
+                        // TODO: send an error message to the client
+                    }
+                }
+            }
+        }
+        _ => {
+            tracing::warn!("Received unknown command from user {}: {:?}", user_id, command.command);
+        }
+    }
+    Ok(())
 }

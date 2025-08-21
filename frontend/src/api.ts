@@ -53,10 +53,14 @@ export interface UserInfo {
   display_name: string;
 }
 
-export async function getUserInfo(): Promise<UserInfo> {
-  const res = await fetch(`${API_BASE}/me`);
-  if (!res.ok) throw new Error("Failed to fetch user info");
-  return res.json();
+export async function getUserInfo(): Promise<UserInfo | null> {
+    try {
+        const res = await fetch(`${API_BASE}/me`, { credentials: "include" });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch {
+        return null;
+    }
 }
 
 export async function updateUserInfo(email?: string, display_name?: string) {

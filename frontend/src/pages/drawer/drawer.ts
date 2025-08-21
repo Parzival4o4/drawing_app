@@ -30,7 +30,7 @@ class Point2D {
 }
 
 interface Shape {
-    readonly id: number;
+    readonly id: string;
     draw(ctx: CanvasRenderingContext2D, selected: boolean, color: string): void;
     pointInShape(point: Point2D): boolean;
     withBorderColor(color: string): Shape;
@@ -48,25 +48,38 @@ interface Shape {
 // only 3 types of events: add shape, remove shape, replace shape (keeps privios z order) 
 abstract class AbstractShape {
     private static counter: number = 0;
-    readonly id: number;
+    private static userId: string = "unknown"; // must be set before creating shapes
+    readonly id: string;
     readonly borderColor: string;
     readonly backgroundColor: string | null;
 
     constructor(
-        borderColor: string = 'black',
+        borderColor: string = "black",
         backgroundColor: string | null = null,
-        id: number | null = null // i need a way to create a shape with the same in event data 
+        id: string | null = null // accept string now
     ) {
-        if (id === null){
-            this.id = AbstractShape.counter++;
+        if (id === null) {
+            this.id = `${AbstractShape.userId}-${AbstractShape.counter++}`;
         } else {
-            if (id >= AbstractShape.counter){
-                AbstractShape.counter = id + 1;
+            // when reloading from events, trust the provided id
+            this.id = id;
+
+            // ensure counter never reuses a number for this user
+            const [, numStr] = id.split("-");
+            const parsedNum = parseInt(numStr, 10);
+            if (!isNaN(parsedNum) && id.startsWith(AbstractShape.userId)) {
+                if (parsedNum >= AbstractShape.counter) {
+                    AbstractShape.counter = parsedNum + 1;
+                }
             }
-            this.id = id
         }
         this.borderColor = borderColor;
         this.backgroundColor = backgroundColor;
+    }
+
+    static setUserId(userId: string) {
+        AbstractShape.userId = userId;
+        AbstractShape.counter = 0; // reset counter for this user
     }
 
     abstract copyWithStyle(...styleArgs: ConstructorParameters<typeof AbstractShape>): Shape; // to implement by child classes
@@ -601,7 +614,7 @@ class SelectTool implements ShapeFactory {
                 this.shapeManager.selectShapeById(ids[index], additive);
             } else {
                 // deselect all 
-                this.shapeManager.selectShapeById(-1, false);
+                this.shapeManager.selectShapeById("", false);
             }
         }
         this.dragPoint= null;
@@ -671,25 +684,25 @@ class ToolArea {
 interface ShapeManager {
     // stuff that changes things 
     addShape(shape: Shape, redraw?: boolean): this;
-    removeShapeWithId(id: number, redraw?: boolean): this;
-    selectShapeById(id: number, additive: boolean): void;
+    removeShapeWithId(id: string, redraw?: boolean): this;
+    selectShapeById(id: string, additive: boolean): void;
     bringSelectedToFront(redraw?: boolean): this;
     sendSelectedToBack(redraw?: boolean): this;
-    replaceShape(oldId: number, newShape: Shape, redraw?: boolean): this; 
+    replaceShape(oldId: string, newShape: Shape, redraw?: boolean): this; 
 
     // alias 
     removeShape(shape: Shape, redraw?: boolean): this;
 
     // geters 
-    getShapeIdsAtPoint(x: number, y: number): number[];
-    getSelectedIds(): number[];
-    getShapeWithId(id:number): Shape; 
+    getShapeIdsAtPoint(x: number, y: number): string[];
+    getSelectedIds(): string[];
+    getShapeWithId(id:string): Shape; 
 }
 
 class Canvas {
     private ctx: CanvasRenderingContext2D;
     private shapes: LinkedListMap<Shape> = new LinkedListMap();
-    private selectedShapes: Set<number> = new Set();
+    private selectedShapes: Set<string> = new Set();
 
     constructor(canvasDomElement: HTMLCanvasElement, toolarea: ToolArea) {
         this.ctx = canvasDomElement.getContext("2d")!;
@@ -739,21 +752,21 @@ class Canvas {
         return redraw ? this.draw() : this;
     }
 
-    private removeShapeWithId(id: number, redraw: boolean = true): this {
+    private removeShapeWithId(id: string, redraw: boolean = true): this {
         // Remove the shape from the main shape list
         this.shapes.removeById(id);
         this.selectedShapes.delete(id);
         return redraw ? this.draw() : this;
     }
 
-    private selectShapeById(id: number, additive: boolean = false): void {
+    private selectShapeById(id: string, additive: boolean = false): void {
         if (!additive) {
             this.selectedShapes.clear();
         }
 
         if (this.selectedShapes.has(id)) {
             this.selectedShapes.delete(id);  // Deselect if already selected
-        } else if (id !== -1) {
+        } else if (id !== "") {
             this.selectedShapes.add(id);
         }
 
@@ -782,7 +795,7 @@ class Canvas {
         return redraw ? this.draw() : this;
     }
 
-    replaceShape(oldId: number, newShape: Shape, redraw: boolean = true): this {
+    replaceShape(oldId: string, newShape: Shape, redraw: boolean = true): this {
         this.shapes.replace(oldId, newShape.id, newShape)
 
         if (this.selectedShapes.has(oldId)) {
@@ -881,9 +894,9 @@ class Canvas {
     }
 
     //getter
-    getShapeIdsAtPoint(x: number, y: number): number[] {
+    getShapeIdsAtPoint(x: number, y: number): string[] {
         const pt = new Point2D(x, y);
-        const result: number[] = [];
+        const result: string[] = [];
 
         for (const shape of this.shapes) {
             if (shape.pointInShape(pt)) {
@@ -891,15 +904,14 @@ class Canvas {
             }
         }
 
-        // Sort ascending by ID for consistency
-        return result.sort((a, b) => a - b);
+        return result;
     }
 
-    getSelectedIds(): number[] {
+    getSelectedIds(): string[] {
         return Array.from(this.selectedShapes);
     }
 
-    getShapeWithId(id: number): Shape {
+    getShapeWithId(id: string): Shape {
         const shape = this.shapes.getById(id);
         if (!shape) {
             throw new Error(`No shape with ID ${id} found.`);
@@ -915,7 +927,7 @@ class Canvas {
 }
 
 
-class EventSystem {
+export class EventSystem {
     private readonly handlers = []
 
     public register(handler: any) {
@@ -959,77 +971,12 @@ class EventSystemUI {
 }
 
 
-export function setupDrawer(
-  canvasDomElm: HTMLCanvasElement,
-  menuElm: HTMLElement,
-  textAreaDomElm: HTMLTextAreaElement,
-  buttonDomElm: HTMLButtonElement
-) {
 
-  let es: EventSystem;
-  let canvas: Canvas;
-  const sm: ShapeManager = {
-    addShape(s, rd) {
-      const event = { type: "shapeAdded", shape: s, redraw: rd };
-      es.apply(event);
-      return this;
-    },
-    removeShape(s, rd) {
-      es.apply({ type: "shapeRemoved", shape: s, redraw: rd });
-      return this;
-    },
-    removeShapeWithId(id, rd) {
-      es.apply({ type: "shapeRemovedWithId", shapeId: id, redraw: rd });
-      return this;
-    },
-    replaceShape(oldId: number, newShape: Shape, redraw?: boolean) {
-      es.apply({ type: "shapeReplaced", oldId, shape: newShape, redraw });
-      return this;
-    },
-    bringSelectedToFront(redraw) {
-      es.apply({ type: "selectedBroughtToFront", redraw: redraw ?? true });
-      return this;
-    },
-    sendSelectedToBack(redraw) {
-      es.apply({ type: "selectedBroughtToBack", redraw: redraw ?? true });
-      return this;
-    },
-    selectShapeById(id, additive) {
-      es.apply({ type: "shapeSelected", id, additive });
-      return this;
-    },
-    getShapeIdsAtPoint(x, y): number[] {
-      return canvas.getShapeIdsAtPoint(x, y);
-    },
-    getSelectedIds() {
-      return canvas.getSelectedIds();
-    },
-    getShapeWithId(id: number): Shape {
-      return canvas.getShapeWithId(id);
-    },
-  };
-
-  const shapesSelector: ShapeFactory[] = [
-    new LineFactory(sm),
-    new CircleFactory(sm),
-    new RectangleFactory(sm),
-    new TriangleFactory(sm),
-    new SelectTool(sm),
-  ];
-
-  const toolArea = new ToolArea(shapesSelector, menuElm);
-
-  canvas = new Canvas(canvasDomElm, toolArea);
-  canvas.draw();
-
-  es = new EventSystem();
-  es.register((event: any) => canvas.apply(event));
-  const esui = new EventSystemUI(es, canvas, textAreaDomElm, buttonDomElm);
-
-  // -------------------------
-  // Popup menu integration
-  // -------------------------
-
+function setupPopup(
+    sm: ShapeManager,
+    canvas: Canvas,
+    canvasDomElm: HTMLCanvasElement
+){
   const contextMenu = menuApi.createMenu();
 
   contextMenu.addItem(
@@ -1095,4 +1042,86 @@ export function setupDrawer(
     const rect = canvasDomElm.getBoundingClientRect();
     contextMenu.show(e.clientX - rect.left, e.clientY - rect.top);
   });
+}
+
+
+import { BackendSync } from "./BackendSync.js";
+
+
+export function setupDrawer(
+  canvasDomElm: HTMLCanvasElement,
+  menuElm: HTMLElement,
+  textAreaDomElm: HTMLTextAreaElement,
+  buttonDomElm: HTMLButtonElement,
+  canvasId: string,
+  userId: string
+) {
+
+  AbstractShape.setUserId(userId);
+
+  let eventSystem = new EventSystem();
+  let canvas: Canvas;
+
+  // connect backend sync
+  new BackendSync(eventSystem, canvasId);
+
+  const shapeManager: ShapeManager = {
+    addShape(s, rd) {
+      const event = { type: "shapeAdded", shape: s, redraw: rd };
+      eventSystem.apply(event);
+      return this;
+    },
+    removeShape(s, rd) {
+      eventSystem.apply({ type: "shapeRemoved", shape: s, redraw: rd });
+      return this;
+    },
+    removeShapeWithId(id, rd) {
+      eventSystem.apply({ type: "shapeRemovedWithId", shapeId: id, redraw: rd });
+      return this;
+    },
+    replaceShape(oldId: string, newShape: Shape, redraw?: boolean) {
+      eventSystem.apply({ type: "shapeReplaced", oldId, shape: newShape, redraw });
+      return this;
+    },
+    bringSelectedToFront(redraw) {
+      eventSystem.apply({ type: "selectedBroughtToFront", redraw: redraw ?? true });
+      return this;
+    },
+    sendSelectedToBack(redraw) {
+      eventSystem.apply({ type: "selectedBroughtToBack", redraw: redraw ?? true });
+      return this;
+    },
+    selectShapeById(id, additive) {
+      eventSystem.apply({ type: "shapeSelected", id, additive });
+      return this;
+    },
+    getShapeIdsAtPoint(x, y): string[] {
+      return canvas.getShapeIdsAtPoint(x, y);
+    },
+    getSelectedIds() {
+      return canvas.getSelectedIds();
+    },
+    getShapeWithId(id: string): Shape {
+      return canvas.getShapeWithId(id);
+    },
+  };
+
+  const toolSelector: ShapeFactory[] = [
+    new LineFactory(shapeManager),
+    new CircleFactory(shapeManager),
+    new RectangleFactory(shapeManager),
+    new TriangleFactory(shapeManager),
+    new SelectTool(shapeManager),
+  ];
+
+  const toolArea = new ToolArea(toolSelector, menuElm);
+
+  canvas = new Canvas(canvasDomElm, toolArea);
+  canvas.draw();
+
+  eventSystem.register((event: any) => canvas.apply(event));
+  const esui = new EventSystemUI(eventSystem, canvas, textAreaDomElm, buttonDomElm);
+
+
+  setupPopup(shapeManager, canvas, canvasDomElm);
 }
