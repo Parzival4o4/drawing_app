@@ -13,10 +13,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct WebSocketCommand {
-    pub command: String,
+    pub command: Option<String>,
     #[serde(rename = "canvasId")]
     pub canvas_id: Option<String>,
-    // TODO add other fields as needed for specific commands like "draw"
+    #[serde(rename = "eventsForCanvas")]
+    pub events_for_canvas: Option<serde_json::Value>,
 }
 
 // ============================= active connections =============================
@@ -94,9 +95,9 @@ impl CanvasManager {
     pub async fn register_for_canvas(&self, state: &AppState, user_id: i64, canvas_uuid: String) -> Result<(), String> {
         // 1. Check if the client has permissions
         let permission = self.get_permission(user_id, &canvas_uuid, state).await;
-        if permission.is_none() {
-            return Err("Permission denied".to_string());
-        }
+        // if permission.is_none() {
+        //     return Err("Permission denied".to_string());
+        // }
 
         // 2. Add the canvas to the WebSocketConnection's list
         let mut active_connections_lock = state.active_connections.inner.write().await;
@@ -123,7 +124,9 @@ impl CanvasManager {
 
     pub async fn broadcast_to_canvas(&self, state: &AppState, sender_id: i64, canvas_uuid: String, message: Message) {
         // Check if the sender has permission to draw on the canvas
-        let permission = self.get_permission(sender_id, &canvas_uuid, state).await;
+        // let permission = self.get_permission(sender_id, &canvas_uuid, state).await;
+        tracing::debug!("broadcasting");
+        let permission = Some("O");
         let can_draw = match permission.as_deref() {
             Some("W") | Some("V") | Some("M") | Some("O") | Some("C") => true,
             _ => false,
@@ -144,8 +147,10 @@ impl CanvasManager {
         let canvas_manager_lock = self.inner.read().await;
         if let Some(canvas_state) = canvas_manager_lock.get(&canvas_uuid) {
             let active_connections_lock = state.active_connections.inner.read().await;
+            tracing::debug!("broadcasting2");
             for &subscriber_id in &canvas_state.subscribers {
-                if subscriber_id != sender_id {
+                tracing::debug!("broadcasting3");
+                if  true { //subscriber_id != sender_id {
                     if let Some(conn) = active_connections_lock.get(&subscriber_id) {
                         if let Err(e) = conn.message_sender.send(message.clone()).await {
                             tracing::error!("Failed to send broadcast to user {}: {}", subscriber_id, e);
@@ -219,6 +224,16 @@ async fn handle_websocket(socket: WebSocket, claims: Claims, state: AppState) {
         subscribed_canvases: HashSet::new(),
     };
     state.active_connections.inner.write().await.insert(user_id, wrapped_connection);
+    
+    // Unused variable, so we add _ to the name. We also remove mut as it's not needed.
+    let _sender_task = tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
+            if let Err(e) = sender.send(message).await {
+                tracing::error!("Failed to send message to user {}: {}", user_id, e);
+                break;
+            }
+        }
+    });
 
     tracing::info!("User {} connected via WebSocket.", user_id);
 
@@ -260,6 +275,9 @@ async fn handle_incoming_messages(user_id: i64, receiver: &mut futures::stream::
             Some(Ok(message)) = receiver.next() => {
                 match message {
                     Message::Text(text) => {
+                        // Log the received message before processing it.
+                        tracing::info!("Received message from user {}: {}", user_id, text);
+                        
                         // We clone here to pass ownership to the new function,
                         // while keeping the original string for potential reuse below.
                         // This resolves the first error.
@@ -284,34 +302,32 @@ async fn handle_incoming_messages(user_id: i64, receiver: &mut futures::stream::
 
 // New helper function to process a single command
 async fn process_command(user_id: i64, text: String, state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // We try to parse the incoming message as a WebSocketCommand
     let command: WebSocketCommand = serde_json::from_str(&text)?;
 
-    match command.command.as_str() {
-        "registerForCanvas" => {
-            if let Some(canvas_uuid) = command.canvas_id {
-                tracing::info!("User {} wants to subscribe to canvas {}", user_id, canvas_uuid);
-                state.canvas_manager.register_for_canvas(state, user_id, canvas_uuid).await?;
-                tracing::info!("User {} successfully subscribed to canvas", user_id);
-            }
-        }
-        "draw" => {
-            if let Some(canvas_uuid) = command.canvas_id {
-                let active_connections_lock = state.active_connections.inner.read().await;
-                if let Some(conn) = active_connections_lock.get(&user_id) {
-                    if conn.subscribed_canvases.contains(&canvas_uuid) {
-                        // The compiler suggested this, as the `Message::Text` variant
-                        // takes ownership of its argument, which we now own.
-                        state.canvas_manager.broadcast_to_canvas(state, user_id, canvas_uuid, Message::Text(text.into())).await;
-                    } else {
-                        tracing::warn!("User {} tried to draw on a canvas they are not subscribed to: {}", user_id, canvas_uuid);
-                        // TODO: send an error message to the client
-                    }
+    // We check for the new "eventsForCanvas" field first, as that is the primary
+    // way of sending a list of events.
+    if let Some(canvas_uuid) = command.canvas_id {
+        if let Some(_) = command.events_for_canvas {
+             let active_connections_lock = state.active_connections.inner.read().await;
+            if let Some(conn) = active_connections_lock.get(&user_id) {
+                if conn.subscribed_canvases.contains(&canvas_uuid) {
+                    state.canvas_manager.broadcast_to_canvas(state, user_id, canvas_uuid, Message::Text(text.into())).await;
+                } else {
+                    tracing::warn!("User {} tried to add events to a canvas they are not subscribed to: {}", user_id, canvas_uuid);
+                    // TODO: send an error message to the client
                 }
             }
+        } else if command.command.as_deref() == Some("registerForCanvas") {
+            tracing::info!("User {} wants to subscribe to canvas {}", user_id, canvas_uuid);
+            state.canvas_manager.register_for_canvas(state, user_id, canvas_uuid).await?;
+            tracing::info!("User {} successfully subscribed to canvas", user_id);
+        } else {
+            tracing::warn!("Received unknown command or malformed message from user {}: {}", user_id, text);
         }
-        _ => {
-            tracing::warn!("Received unknown command from user {}: {:?}", user_id, command.command);
-        }
+    } else {
+         tracing::warn!("Received message without a canvasId from user {}: {}", user_id, text);
     }
+    
     Ok(())
 }

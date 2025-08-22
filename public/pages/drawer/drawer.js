@@ -533,7 +533,7 @@ class ToolArea {
         return this.selectedShape;
     }
 }
-class Canvas {
+export class Canvas {
     ctx;
     shapes = new LinkedListMap();
     selectedShapes = new Set();
@@ -754,7 +754,7 @@ function setupPopup(sm, canvas, canvasDomElm) {
         sm.getSelectedIds().forEach((id) => {
             const original = sm.getShapeWithId(id);
             const updated = original.withBorderColor(key);
-            sm.replaceShape(id, updated, false);
+            sm.replaceShape(id, updated, true);
         });
         canvas.draw();
     }));
@@ -763,7 +763,7 @@ function setupPopup(sm, canvas, canvasDomElm) {
             const original = sm.getShapeWithId(id);
             const color = key === "transparent" ? null : key;
             const updated = original.withBackgroundColor(color);
-            sm.replaceShape(id, updated, false);
+            sm.replaceShape(id, updated, true);
         });
         canvas.draw();
     }));
@@ -783,38 +783,35 @@ function setupPopup(sm, canvas, canvasDomElm) {
 import { BackendSync } from "./BackendSync.js";
 export function setupDrawer(canvasDomElm, menuElm, textAreaDomElm, buttonDomElm, canvasId, userId) {
     AbstractShape.setUserId(userId);
-    let eventSystem = new EventSystem();
-    let canvas;
-    // connect backend sync
-    new BackendSync(eventSystem, canvasId);
-    const shapeManager = {
+    const es = new EventSystem();
+    let canvas; // declare first so closures can reference it
+    const sm = {
         addShape(s, rd) {
-            const event = { type: "shapeAdded", shape: s, redraw: rd };
-            eventSystem.apply(event);
+            es.apply({ type: "shapeAdded", shape: s, redraw: rd });
             return this;
         },
         removeShape(s, rd) {
-            eventSystem.apply({ type: "shapeRemoved", shape: s, redraw: rd });
+            es.apply({ type: "shapeRemoved", shape: s, redraw: rd });
             return this;
         },
         removeShapeWithId(id, rd) {
-            eventSystem.apply({ type: "shapeRemovedWithId", shapeId: id, redraw: rd });
+            es.apply({ type: "shapeRemovedWithId", shapeId: id, redraw: rd });
             return this;
         },
         replaceShape(oldId, newShape, redraw) {
-            eventSystem.apply({ type: "shapeReplaced", oldId, shape: newShape, redraw });
+            es.apply({ type: "shapeReplaced", oldId, shape: newShape, redraw: redraw });
             return this;
         },
         bringSelectedToFront(redraw) {
-            eventSystem.apply({ type: "selectedBroughtToFront", redraw: redraw ?? true });
+            es.apply({ type: "selectedBroughtToFront", redraw: redraw ?? true });
             return this;
         },
         sendSelectedToBack(redraw) {
-            eventSystem.apply({ type: "selectedBroughtToBack", redraw: redraw ?? true });
+            es.apply({ type: "selectedBroughtToBack", redraw: redraw ?? true });
             return this;
         },
         selectShapeById(id, additive) {
-            eventSystem.apply({ type: "shapeSelected", id, additive });
+            es.apply({ type: "shapeSelected", id, additive });
             return this;
         },
         getShapeIdsAtPoint(x, y) {
@@ -828,17 +825,20 @@ export function setupDrawer(canvasDomElm, menuElm, textAreaDomElm, buttonDomElm,
         },
     };
     const toolSelector = [
-        new LineFactory(shapeManager),
-        new CircleFactory(shapeManager),
-        new RectangleFactory(shapeManager),
-        new TriangleFactory(shapeManager),
-        new SelectTool(shapeManager),
+        new LineFactory(sm),
+        new CircleFactory(sm),
+        new RectangleFactory(sm),
+        new TriangleFactory(sm),
+        new SelectTool(sm),
     ];
     const toolArea = new ToolArea(toolSelector, menuElm);
+    // ✅ Create canvas before BackendSync
     canvas = new Canvas(canvasDomElm, toolArea);
     canvas.draw();
-    eventSystem.register((event) => canvas.apply(event));
-    const esui = new EventSystemUI(eventSystem, canvas, textAreaDomElm, buttonDomElm);
-    setupPopup(shapeManager, canvas, canvasDomElm);
+    // Hook textarea/logger etc.
+    const esui = new EventSystemUI(es, canvas, textAreaDomElm, buttonDomElm);
+    // ✅ Now it’s safe to create BackendSync (canvas exists)
+    new BackendSync(es, canvas, canvasId);
+    setupPopup(sm, canvas, canvasDomElm);
 }
 //# sourceMappingURL=drawer.js.map
