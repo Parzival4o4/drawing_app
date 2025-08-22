@@ -2,12 +2,16 @@
 // Add these imports to your handlers.rs
 use axum::{extract::{ws::{Message, WebSocket}, State, WebSocketUpgrade}, response::IntoResponse};
 use futures::StreamExt;
-use std::{collections::{HashMap, HashSet}, sync::Arc};
-use tokio::sync::{mpsc, RwLock};
+use std::{collections::{HashMap, HashSet}, path::Path, sync::Arc};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use crate::auth::{get_claims, Claims, PartialClaims};
 use crate::AppState; // Import AppState
 use futures::SinkExt;
 use serde::{Deserialize, Serialize};
+use tokio::fs::{OpenOptions}; // New imports for file I/O
+use tokio::io::AsyncWriteExt; // New import for writing to files
+use std::path::PathBuf;
+use sqlx::query; // New import for database query
 
 // ============================= Command Struct =============================
 
@@ -61,12 +65,21 @@ impl WebSocketConnections {
 
 // ============================= canvas subscriptions =============================
 
+// New helper function to read all events from a canvas file.
+async fn get_all_events(file_path: &Path) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let file = tokio::fs::read_to_string(file_path).await?;
+    let events: Vec<serde_json::Value> = file.lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    Ok(serde_json::Value::Array(events))
+}
+
 // New struct to manage a single canvas's subscribers and state
 #[derive(Debug)]
 pub struct CanvasState {
     pub is_moderated: bool,
-    // A list of subscribed user IDs.
     pub subscribers: HashSet<i64>,
+    pub file_mutex: Arc<Mutex<()>>,  // <-- use Arc here
 }
 
 // A new struct to encapsulate all canvas subscriptions
@@ -92,76 +105,192 @@ impl CanvasManager {
         }
     }
 
-    pub async fn register_for_canvas(&self, state: &AppState, user_id: i64, canvas_uuid: String) -> Result<(), String> {
-        // 1. Check if the client has permissions
-        let permission = self.get_permission(user_id, &canvas_uuid, state).await;
-        // if permission.is_none() {
-        //     return Err("Permission denied".to_string());
-        // }
 
-        // 2. Add the canvas to the WebSocketConnection's list
+
+pub async fn register_for_canvas(&self, state: &AppState, user_id: i64, canvas_uuid: String) -> Result<(), String> {
+    // 1. Check if the client has permissions
+    let permission = self.get_permission(user_id, &canvas_uuid, state).await;
+    if permission.is_none() {
+        return Err("Permission denied".to_string());
+    }
+
+    // 2. Add the canvas to the WebSocketConnection's list
+    let conn = {
         let mut active_connections_lock = state.active_connections.inner.write().await;
         if let Some(conn) = active_connections_lock.get_mut(&user_id) {
             conn.subscribed_canvases.insert(canvas_uuid.clone());
+            conn.message_sender.clone()
         } else {
             return Err("User's connection not found".to_string());
         }
+    };
 
-        // 3. Update the CanvasManager
-        let mut canvas_manager_lock = self.inner.write().await;
-        let canvas_state = canvas_manager_lock
-            .entry(canvas_uuid)
-            .or_insert_with(|| CanvasState {
-                is_moderated: false,
-                subscribers: HashSet::new(),
-            });
+    // 3. Update the CanvasManager
+    let mut canvas_manager_lock = self.inner.write().await;
+    let canvas_state = canvas_manager_lock
+        .entry(canvas_uuid.clone())
+        .or_insert_with(|| CanvasState {
+            is_moderated: false,
+            subscribers: HashSet::new(),
+            file_mutex: Arc::new(Mutex::new(())),
+        });
 
-        // Add the user to the canvas subscribers
-        canvas_state.subscribers.insert(user_id);
+    // Add the user to the canvas subscribers
+    canvas_state.subscribers.insert(user_id);
 
-        Ok(())
+    // 4. Load and send the full canvas event history to the client
+    let file_path_str = match query!("SELECT event_file_path FROM Canvas WHERE canvas_id = ?", canvas_uuid)
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(row) => row.event_file_path,
+        Err(e) => {
+            tracing::error!("Failed to find file path for canvas {}: {:?}", canvas_uuid, e);
+            return Err("Failed to find canvas data".to_string());
+        }
+    };
+    
+    let file_path = PathBuf::from(&file_path_str);
+
+    let events = match get_all_events(&file_path).await {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::error!("Failed to read events from file {}: {:?}", file_path_str, e);
+            return Err("Failed to load canvas events".to_string());
+        }
+    };
+    
+    let command_to_send = WebSocketCommand {
+        command: None, // No command for this message
+        canvas_id: Some(canvas_uuid),
+        events_for_canvas: Some(events),
+    };
+
+    let message_text = serde_json::to_string(&command_to_send).unwrap();
+    if let Err(e) = conn.send(Message::Text(message_text.into())).await {
+        tracing::error!("Failed to send event history to user {}: {}", user_id, e);
+        // The user connection is likely gone, but we still return Ok as the registration itself succeeded
     }
 
-    pub async fn broadcast_to_canvas(&self, state: &AppState, sender_id: i64, canvas_uuid: String, message: Message) {
-        // Check if the sender has permission to draw on the canvas
-        // let permission = self.get_permission(sender_id, &canvas_uuid, state).await;
-        tracing::debug!("broadcasting");
-        let permission = Some("O");
-        let can_draw = match permission.as_deref() {
-            Some("W") | Some("V") | Some("M") | Some("O") | Some("C") => true,
-            _ => false,
-        };
-        
-        // Check for moderated state for "W" permission
-        let is_moderated = {
-            let canvas_manager_lock = self.inner.read().await;
-            canvas_manager_lock.get(&canvas_uuid).map_or(false, |cs| cs.is_moderated)
-        };
-        
-        if !can_draw || (is_moderated && matches!(permission.as_deref(), Some("W"))) {
-            tracing::warn!("User {} tried to draw on canvas {} without sufficient permission or due to moderation.", sender_id, canvas_uuid);
-            // TODO: send a specific error message back to the sender
-            return;
-        }
+    Ok(())
+}
 
+    // New helper function to broadcast the events to subscribed users
+    pub async fn broadcast_events(&self, state: &AppState, canvas_uuid: &str, message: Message) {
         let canvas_manager_lock = self.inner.read().await;
-        if let Some(canvas_state) = canvas_manager_lock.get(&canvas_uuid) {
+        if let Some(canvas_state) = canvas_manager_lock.get(canvas_uuid) {
             let active_connections_lock = state.active_connections.inner.read().await;
             tracing::debug!("broadcasting2");
             for &subscriber_id in &canvas_state.subscribers {
                 tracing::debug!("broadcasting3");
-                if  true { //subscriber_id != sender_id {
-                    if let Some(conn) = active_connections_lock.get(&subscriber_id) {
-                        if let Err(e) = conn.message_sender.send(message.clone()).await {
-                            tracing::error!("Failed to send broadcast to user {}: {}", subscriber_id, e);
-                        }
+                if let Some(conn) = active_connections_lock.get(&subscriber_id) {
+                    if let Err(e) = conn.message_sender.send(message.clone()).await {
+                        tracing::error!("Failed to send broadcast to user {}: {}", subscriber_id, e);
                     }
                 }
             }
         }
     }
-}
 
+    // Renamed and adapted function to add events to the file and broadcast
+    pub async fn add_events_to_canvas(
+        &self,
+        state: &AppState,
+        sender_id: i64,
+        command: WebSocketCommand,
+        original_message_text: String,
+    ) {
+        let canvas_uuid = command.canvas_id.expect("Canvas ID must exist at this point");
+
+        let permission = self.get_permission(sender_id, &canvas_uuid, state).await;
+        let can_draw =
+            matches!(permission.as_deref(), Some("W") | Some("V") | Some("M") | Some("O") | Some("C"));
+
+        let is_moderated = {
+            let canvas_manager_lock = self.inner.read().await;
+            canvas_manager_lock
+                .get(&canvas_uuid)
+                .map_or(false, |cs| cs.is_moderated)
+        };
+
+        if !can_draw || (is_moderated && matches!(permission.as_deref(), Some("W"))) {
+            tracing::warn!(
+                "User {} tried to draw on canvas {} without sufficient permission or due to moderation.",
+                sender_id,
+                canvas_uuid
+            );
+            return;
+        }
+
+        let events = match command.events_for_canvas {
+            Some(serde_json::Value::Array(events)) => events,
+            _ => {
+                tracing::error!("Events field is missing or not an array.");
+                return;
+            }
+        };
+
+        let file_path_str = match query!(
+            "SELECT event_file_path FROM Canvas WHERE canvas_id = ?",
+            canvas_uuid
+        )
+        .fetch_one(&state.pool)
+        .await
+        {
+            Ok(row) => row.event_file_path,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to find file path for canvas {}: {:?}",
+                    canvas_uuid,
+                    e
+                );
+                return;
+            }
+        };
+
+        let file_path = PathBuf::from(&file_path_str);
+
+        let file_mutex = {
+            let mut canvas_manager_lock = self.inner.write().await;
+            let canvas_state = canvas_manager_lock
+                .entry(canvas_uuid.clone())
+                .or_insert_with(|| CanvasState {
+                    is_moderated: false,
+                    subscribers: HashSet::new(),
+                    file_mutex: Arc::new(Mutex::new(())), // Initialize the Arc-wrapped Mutex
+                });
+            canvas_state.file_mutex.clone() // Now you can clone the Arc
+        };
+
+        let file_lock = file_mutex.lock().await;
+
+        let mut file = match OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&file_path)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("Failed to open or create file {}: {}", file_path_str, e);
+                return;
+            }
+        };
+
+        for event in events {
+            let event_line = event.to_string() + "\n";
+            if let Err(e) = file.write_all(event_line.as_bytes()).await {
+                tracing::error!("Failed to write to file {}: {}", file_path_str, e);
+                return;
+            }
+        }
+
+        drop(file_lock);
+
+        self.broadcast_events(state, &canvas_uuid, Message::Text(original_message_text.into()))
+            .await;
+    }
+}
 
 // ============================= handlers =============================
 
@@ -280,7 +409,6 @@ async fn handle_incoming_messages(user_id: i64, receiver: &mut futures::stream::
                         
                         // We clone here to pass ownership to the new function,
                         // while keeping the original string for potential reuse below.
-                        // This resolves the first error.
                         if let Err(e) = process_command(user_id, text.to_string(), state).await {
                             tracing::error!("Failed to process command for user {}: {}", user_id, e);
                             // TODO: Consider sending an error message back to the client
@@ -302,17 +430,14 @@ async fn handle_incoming_messages(user_id: i64, receiver: &mut futures::stream::
 
 // New helper function to process a single command
 async fn process_command(user_id: i64, text: String, state: &AppState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // We try to parse the incoming message as a WebSocketCommand
     let command: WebSocketCommand = serde_json::from_str(&text)?;
 
-    // We check for the new "eventsForCanvas" field first, as that is the primary
-    // way of sending a list of events.
-    if let Some(canvas_uuid) = command.canvas_id {
+    if let Some(canvas_uuid) = command.canvas_id.clone() {
         if let Some(_) = command.events_for_canvas {
-             let active_connections_lock = state.active_connections.inner.read().await;
+            let active_connections_lock = state.active_connections.inner.read().await;
             if let Some(conn) = active_connections_lock.get(&user_id) {
                 if conn.subscribed_canvases.contains(&canvas_uuid) {
-                    state.canvas_manager.broadcast_to_canvas(state, user_id, canvas_uuid, Message::Text(text.into())).await;
+                    state.canvas_manager.add_events_to_canvas(state, user_id, command, text).await;
                 } else {
                     tracing::warn!("User {} tried to add events to a canvas they are not subscribed to: {}", user_id, canvas_uuid);
                     // TODO: send an error message to the client
@@ -326,7 +451,7 @@ async fn process_command(user_id: i64, text: String, state: &AppState) -> Result
             tracing::warn!("Received unknown command or malformed message from user {}: {}", user_id, text);
         }
     } else {
-         tracing::warn!("Received message without a canvasId from user {}: {}", user_id, text);
+        tracing::warn!("Received message without a canvasId from user {}: {}", user_id, text);
     }
     
     Ok(())

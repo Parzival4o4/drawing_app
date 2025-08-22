@@ -13,7 +13,7 @@ CREATE TABLE Canvas (
     name TEXT NOT NULL DEFAULT 'Untitled Canvas', -- User-friendly name for the canvas
     owner_user_id INTEGER NOT NULL, -- Reference to the user who created/owns the canvas
     moderated BOOLEAN NOT NULL DEFAULT FALSE, -- True if the canvas is in a moderated state
-    event_store TEXT NOT NULL DEFAULT '', -- Stores the concatenated JSON events
+    event_file_path TEXT NOT NULL DEFAULT '', -- Stores the path to the event file
 
     FOREIGN KEY (owner_user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );

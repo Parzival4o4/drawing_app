@@ -1,4 +1,7 @@
 // src/handlers.rs
+use std::{path::PathBuf};
+use tokio::fs; 
+
 use axum::{
     extract::State,
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -114,26 +117,37 @@ pub struct CreateCanvasPayload {
 
 pub async fn create_canvas(
     State(state): State<AppState>,
-    claims: Claims, // User who is creating the canvas (owner)
-    Json(payload): Json<CreateCanvasPayload>, // Name of the new canvas, now from JSON
+    claims: Claims,
+    Json(payload): Json<CreateCanvasPayload>,
 ) -> impl IntoResponse {
 
     let pool = state.pool;
 
-    // 1. Validate payload
     if payload.name.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "Canvas name cannot be empty."})),
-        )
-            .into_response();
+        ).into_response();
     }
 
-    // 2. Generate a unique canvas_id
     let canvas_id = Uuid::new_v4().to_string();
     let owner_user_id = claims.user_id;
     let canvas_name = payload.name.trim().to_string();
+    
+    let data_dir = PathBuf::from("data");
+    let canvases_dir = data_dir.join("canvases");
+    let file_path = canvases_dir.join(format!("{}.jsonl", canvas_id));
 
+    if let Err(e) = fs::create_dir_all(&canvases_dir).await {
+        tracing::error!("Failed to create canvases directory: {:?}", e);
+        return AuthError::DbError.into_response();
+    }
+
+    if let Err(e) = fs::File::create(&file_path).await {
+        tracing::error!("Failed to create event file at {}: {:?}", file_path.display(), e);
+        return AuthError::DbError.into_response();
+    }
+    
     let mut tx = match pool.begin().await {
         Ok(t) => t,
         Err(e) => {
@@ -142,14 +156,16 @@ pub async fn create_canvas(
         }
     };
 
-    // 3. Insert into Canvas table
+    // Fix for the temporary value dropped while borrowed error
+    let file_path_str = file_path.to_str().unwrap_or("");
+
     if let Err(e) = sqlx::query!(
-        "INSERT INTO Canvas (canvas_id, name, owner_user_id, moderated, event_store) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO Canvas (canvas_id, name, owner_user_id, moderated, event_file_path) VALUES (?, ?, ?, ?, ?)",
         canvas_id,
         canvas_name,
         owner_user_id,
         false,
-        ""
+        file_path_str // Use the new variable here
     )
     .execute(&mut *tx)
     .await
@@ -159,7 +175,6 @@ pub async fn create_canvas(
         return AuthError::DbError.into_response();
     }
 
-    // 4. Insert into Canvas_Permissions table (set creator as Owner)
     if let Err(e) = sqlx::query!(
         "INSERT INTO Canvas_Permissions (user_id, canvas_id, permission_level) VALUES (?, ?, ?)",
         owner_user_id,
@@ -174,17 +189,14 @@ pub async fn create_canvas(
         return AuthError::DbError.into_response();
     }
 
-    // 5. Commit the transaction
     if let Err(e) = tx.commit().await {
         tracing::error!("Failed to commit transaction for canvas ID {}: {:?}", canvas_id, e);
         return AuthError::DbError.into_response();
     }
-
-    // 6. Update canvas permissions in claims
+    
     let mut updated_canvas_permissions = claims.canvas_permissions.clone();
     updated_canvas_permissions.insert(canvas_id.clone(), "O".to_string());
 
-    // Step 1: Build new claims with updated permissions
     let updated_partial_claims = PartialClaims {
         email: claims.email.clone(),
         user_id: Some(claims.user_id),
@@ -201,10 +213,8 @@ pub async fn create_canvas(
         }
     };
     
-    // Step 2: Update the claims in the active WebSocket connections
     state.active_connections.update_user_claims(claims.user_id, updated_claims.clone()).await;
 
-    // Step 3: Create new cookie from updated claims
     match get_cookie_from_claims(updated_claims).await {
         Ok(cookie) => {
             let headers = create_cookie_header(cookie);
@@ -215,8 +225,7 @@ pub async fn create_canvas(
                     "message": "Canvas created successfully",
                     "canvas_id": canvas_id,
                 })),
-            )
-                .into_response()
+            ).into_response()
         }
         Err(e) => e.into_response(),
     }

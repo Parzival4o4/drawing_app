@@ -34,7 +34,6 @@ ENV DATABASE_URL="sqlite:///app/data/sqlx_build_cache.db"
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY login.html register.html ./
 COPY migrations ./migrations
 
 # Verification and migration steps
@@ -67,7 +66,6 @@ COPY --from=frontend-builder /app/public ./public
 
 # Copy your HTML templates if they are read from Rust (and not served by ServeDir from public/)
 # Ensure `home.html` is included here if your app serves it directly.
-COPY login.html register.html ./
 
 # Set environment variables for the application at runtime
 ENV JWT_SECRET="your_secure_jwt_secret_here"
