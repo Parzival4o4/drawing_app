@@ -21,7 +21,7 @@ use handlers::{
     get_user_info, update_profile};
 use std::sync::Arc;
 
-use crate::{auth::start_cleanup_task, handlers::{create_canvas, get_canvas_list, login, logout, register}, ws_stuff::{ws_handler, CanvasManager, WebSocketConnections}};
+use crate::{auth::start_cleanup_task, handlers::{create_canvas, get_canvas_list, get_canvas_permissions, login, logout, register, update_canvas_permissions}, ws_stuff::{ws_handler, CanvasManager, WebSocketConnections}};
 
 // ───── 1. Constants / statics ──────────────
 // Corrected LazyLock type annotation
@@ -124,6 +124,7 @@ fn create_app_router(state: AppState) -> Router {
         .route("/user/update", post(update_profile))
         .route("/canvases/create", post(create_canvas))
         .route("/canvases/list", get(get_canvas_list))
+        .route("/canvas/{canvas_id}/permissions", post(update_canvas_permissions).get(get_canvas_permissions))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware));
 
     // Public API routes for authentication and other unauthenticated endpoints.

@@ -1,16 +1,16 @@
 // src/handlers.rs
-use std::{path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 use tokio::fs; 
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse},
+    response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{Error as SqlxError};
+use sqlx::{query, Error as SqlxError, SqlitePool};
 use sqlx::{Row};
 use uuid::Uuid;
 
@@ -230,6 +230,206 @@ pub async fn create_canvas(
         Err(e) => e.into_response(),
     }
 }
+
+// ====================== Permissions ======================
+
+
+#[derive(Deserialize)]
+pub struct UpdatePermissionRequest {
+    pub user_id: i64,
+    pub permission: String,
+}
+
+#[derive(Serialize)]
+struct GenericResponse {
+    message: String,
+}
+
+pub async fn update_canvas_permissions(
+    claims: Claims,
+    State(state): State<AppState>,
+    Path(canvas_id): Path<String>, // Correct usage for path parameter
+    Json(payload): Json<UpdatePermissionRequest>,
+) -> impl IntoResponse {
+    // 1. Get acting user's permission
+    let acting_user_permission = claims.canvas_permissions.get(&canvas_id);
+
+    // 2. Check if the acting user is trying to change their own permissions
+    if claims.user_id == payload.user_id {
+        tracing::warn!("User {} tried to change their own permissions on canvas {}.", claims.user_id, canvas_id);
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(GenericResponse { message: "Cannot change your own permissions.".to_string() }),
+        ).into_response();
+    }
+
+    // 3. Get the target user's current permission from the DB
+    let target_user_permission = get_user_canvas_permissions_from_db(&state.pool, &canvas_id, payload.user_id).await;
+    
+    // 4. Check if the target user is the owner ("O"). No one can change the owner's permissions.
+    if let Some(target_permission) = &target_user_permission {
+        if target_permission == "O" {
+            tracing::warn!("User {} tried to change the owner's permissions on canvas {}.", claims.user_id, canvas_id);
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                Json(GenericResponse { message: "Cannot change the owner's permissions.".to_string() }),
+            ).into_response();
+        }
+    }
+
+    // 5. Check if the acting user has the right to change permissions
+    let can_change = match acting_user_permission.map(|p| p.as_str()) {
+        Some("C") | Some("O") => true, // "C" and "O" can change any permission
+        Some("M") => {
+            // "M" can't assign "C" or "M"
+            !matches!(payload.permission.as_str(), "C" | "M") && !matches!(target_user_permission.as_deref(), Some("C") | Some("O") | Some("M"))
+        }
+        _ => {
+            tracing::warn!("User {} does not have sufficient permission to change permissions on canvas {}.", claims.user_id, canvas_id);
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                Json(GenericResponse { message: "Insufficient permissions.".to_string() }),
+            ).into_response();
+        }
+    };
+
+    if !can_change {
+        tracing::warn!("Permission check failed for user {} on canvas {}. New permission: {}, Target current: {:?}",
+            claims.user_id, canvas_id, payload.permission, target_user_permission);
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(GenericResponse { message: "Insufficient permissions for this action.".to_string() }),
+        ).into_response();
+    }
+    
+    // 6. Update the DB
+    match update_user_canvas_permissions(&state.pool, &canvas_id, payload.user_id, &payload.permission).await {
+        Ok(_) => {
+            tracing::info!("Permissions for user {} on canvas {} updated to {}.", payload.user_id, canvas_id, payload.permission);
+            
+            // 7. Mark the user for a state refresh
+            state.permission_refresh_list.mark_user_for_refresh(payload.user_id).await;
+            
+            // 8. Call the permission_update function on the WebSocketConnections
+            // This will be implemented later to propagate the changes.
+            state.active_connections.permission_update(&state, payload.user_id).await;
+            
+            (
+                axum::http::StatusCode::OK,
+                Json(GenericResponse { message: "Permissions updated successfully.".to_string() }),
+            ).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to update permissions for user {} on canvas {}: {}", payload.user_id, canvas_id, e);
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(GenericResponse { message: "Failed to update permissions.".to_string() }),
+            ).into_response()
+        }
+    }
+}
+
+
+pub async fn get_user_canvas_permissions_from_db(
+    pool: &SqlitePool,
+    canvas_id: &str,
+    user_id: i64,
+) -> Option<String> {
+    let result = query!(
+        "SELECT permission_level FROM Canvas_Permissions WHERE canvas_id = ? AND user_id = ?",
+        canvas_id,
+        user_id
+    )
+    .fetch_optional(pool)
+    .await;
+
+    match result {
+        Ok(record) => record.map(|r| r.permission_level),
+        Err(e) => {
+            tracing::error!("Failed to fetch user permissions from DB: {:?}", e);
+            None
+        }
+    }
+}
+
+pub async fn update_user_canvas_permissions(
+    pool: &SqlitePool,
+    canvas_id: &str,
+    user_id: i64,
+    permission_level: &str,
+) -> Result<(), SqlxError> { // Corrected function signature
+    query!(
+        "INSERT INTO Canvas_Permissions (user_id, canvas_id, permission_level)
+         VALUES (?, ?, ?)
+         ON CONFLICT(user_id, canvas_id) DO UPDATE SET permission_level = excluded.permission_level",
+        user_id,
+        canvas_id,
+        permission_level
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+
+
+// A new struct to represent a user for the JSON response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CanvasUser {
+    pub user_id: i64,
+    pub display_name: String,
+}
+
+/// Retrieves all users and their permissions for a given canvas.
+pub async fn get_canvas_permissions(
+    State(state): State<AppState>,
+    Path(canvas_id): Path<String>,
+) -> Result<Json<HashMap<String, Vec<CanvasUser>>>, StatusCode> {
+    // Perform a SQL query to get all users and their permissions for the canvas
+    let rows = sqlx::query!(
+        r#"
+        SELECT
+            T1.permission_level,
+            T2.user_id,
+            T2.display_name
+        FROM
+            Canvas_Permissions AS T1
+        JOIN
+            users AS T2
+        ON
+            T1.user_id = T2.user_id
+        WHERE
+            T1.canvas_id = ?
+        "#,
+        canvas_id
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database query error fetching canvas permissions: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Use a HashMap to group users by their permission level
+    let mut permissions_map: HashMap<String, Vec<CanvasUser>> = HashMap::new();
+
+    for row in rows {
+        let user = CanvasUser {
+            user_id: row.user_id,
+            display_name: row.display_name,
+        };
+
+        // Get the vector for the current permission level, or create a new one if it doesn't exist.
+        let users_for_permission = permissions_map.entry(row.permission_level).or_insert_with(Vec::new);
+
+        // Add the user to the vector
+        users_for_permission.push(user);
+    }
+
+    Ok(Json(permissions_map))
+}
+
 
 // ====================== User Profile ======================
 
