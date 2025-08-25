@@ -40,9 +40,6 @@ impl IdentifiableWebSocket {
 
     /// Primary function to send a WebSocket message.
     pub async fn send(&self, message: Message) -> Result<(), mpsc::error::SendError<Message>> {
-        // Log the message being sent
-        // Note: The Message type must implement the Debug trait for {:?} formatting.
-        tracing::info!("Sending message: {:?}", message.to_text());
 
         // Use the inner mpsc::Sender
         self.sender.send(message).await

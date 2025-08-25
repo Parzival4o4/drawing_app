@@ -8,6 +8,7 @@ use crate::auth::{get_claims, Claims, PartialClaims};
 use crate::AppState; // Import AppState
 use serde::{Deserialize, Serialize};
 use crate::identifiable_web_socket::IdentifiableWebSocket;
+use futures::SinkExt; // needed for sender.send(...)
 
 
 // ============================= message Struct =============================
@@ -81,20 +82,31 @@ pub async fn ws_handler(
 
 
 
+
 async fn handle_websocket(socket: WebSocket, claims: Claims, state: AppState) {
     let user_id = claims.user_id;
     state.socket_claims_manager.add_connection_and_claims(user_id, claims).await;
 
-    let (_sender, mut receiver) = socket.split();
-    let (tx, _rx) = mpsc::channel::<Message>(128);
+    let (mut sender, mut receiver) = socket.split(); // sender is a SplitSink<WebSocket, Message>
+    let (tx, mut rx) = mpsc::channel::<Message>(128);
 
     let id_socket = IdentifiableWebSocket::new(tx);
     tracing::info!("User {} connected via WebSocket.", user_id);
 
+    // Spawn a task to forward messages from the channel to the WebSocket sink
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let Err(e) = sender.send(msg).await {
+                tracing::error!("Failed to send message to client: {}", e);
+                break;
+            }
+        }
+    });
+
     // Track canvases this connection has subscribed to
     let mut subscribed_canvases = HashSet::<String>::new();
 
-    // Handle the loop
+    // Handle incoming messages loop
     handle_incoming_messages(
         user_id,
         &mut receiver,
@@ -122,6 +134,8 @@ async fn handle_websocket(socket: WebSocket, claims: Claims, state: AppState) {
 
     tracing::info!("User {}'s WebSocket connection cleanup complete.", user_id);
 }
+
+
 
 async fn handle_incoming_messages(
     user_id: i64,

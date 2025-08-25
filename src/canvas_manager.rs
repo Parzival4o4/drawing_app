@@ -98,41 +98,55 @@ impl CanvasManager {
 
 
     // Helper function to read history and send moderation state first
-    async fn send_canvas_history(
-        connection: &IdentifiableWebSocket,
-        file_path: &PathBuf,
-        canvas_uuid: &str,
-        is_moderated: bool,
-    ) {
-        // 1. Send moderation state
-        let moderated_msg = json!({
-            "canvasId": canvas_uuid,
-            "moderated": is_moderated
-        });
+async fn send_canvas_history(
+    connection: &IdentifiableWebSocket,
+    file_path: &PathBuf,
+    canvas_uuid: &str,
+    is_moderated: bool,
+) {
+    // 1. Send moderation state
+    let moderated_msg = json!({
+        "canvasId": canvas_uuid,
+        "moderated": is_moderated
+    });
 
-        if let Err(e) = connection.send(Message::Text(moderated_msg.to_string().into())).await {
-            tracing::error!("Failed to send moderation state to client {}: {}", connection.id, e);
-        }
+    if let Err(e) = connection.send(Message::Text(moderated_msg.to_string().into())).await {
+        tracing::error!("Failed to send moderation state to client {}: {}", connection.id, e);
+    }
 
-        // 2. Send history
-        match tokio::fs::read_to_string(file_path).await {
-            Ok(content) => {
-                let events: Vec<&str> = content.lines().filter(|s| !s.is_empty()).collect();
+    // 2. Send history
+    match tokio::fs::read_to_string(file_path).await {
+        Ok(content) => {
+            let mut events = Vec::new();
 
-                let history_message = json!({
-                    "canvas_id": canvas_uuid,
-                    "eventsForCanvas": events
-                });
-
-                if let Err(e) = connection.send(Message::Text(history_message.to_string().into())).await {
-                    tracing::error!("Failed to send history to client {}: {}", connection.id, e);
+            for line in content.lines() {
+                if line.trim().is_empty() {
+                    continue;
                 }
-            },
-            Err(_) => {
-                connection.notify_client("Failed to load canvas history. Try refreshing.").await;
+
+                match serde_json::from_str::<serde_json::Value>(line) {
+                    Ok(value) => events.push(value),
+                    Err(e) => {
+                        tracing::warn!("Skipping invalid line in canvas {} history: {}", canvas_uuid, e);
+                    }
+                }
             }
+
+            let history_message = json!({
+                "canvasId": canvas_uuid,
+                "eventsForCanvas": events
+            });
+
+            if let Err(e) = connection.send(Message::Text(history_message.to_string().into())).await {
+                tracing::error!("Failed to send history to client {}: {}", connection.id, e);
+            }
+        },
+        Err(_) => {
+            connection.notify_client("Failed to load canvas history. Try refreshing.").await;
         }
     }
+}
+
 
 
 
@@ -147,55 +161,47 @@ impl CanvasManager {
         user_id: i64,
         connection: IdentifiableWebSocket,
     ) {
-        
-        let mut file_path: PathBuf;
-        let connection_clone = connection.clone(); // Clone for use in error path and final insertion
+        let connection_clone = connection.clone(); // Clone for error path and final insertion
 
         // Acquire write lock on the manager's HashMap
         let mut manager_lock = self.inner.write().await;
 
-        let canvas_state = {
-            let pool = &app_state.pool;
+        // Ensure canvas state exists in memory
+        if !manager_lock.contains_key(&canvas_uuid) {
+            tracing::info!("Canvas {} not in memory. Fetching info from DB.", canvas_uuid);
 
-            if !manager_lock.contains_key(&canvas_uuid) {
-                tracing::info!("Canvas {} not in memory. Fetching info from DB.", canvas_uuid);
-                
-                // Attempt to load info from DB
-                match Self::get_canvas_info(pool, &canvas_uuid).await {
-                    Ok(db_info) => {
-                        // Success: Insert the new CanvasState
-                        file_path = db_info.file_path.clone();
-                        let new_state = CanvasState::new(db_info);
-                        manager_lock.insert(canvas_uuid.clone(), new_state);
-                    },
+            // Attempt to load info from DB
+            match Self::get_canvas_info(&app_state.pool, &canvas_uuid).await {
+                Ok(db_info) => {
+                    let new_state = CanvasState::new(db_info);
+                    manager_lock.insert(canvas_uuid.clone(), new_state);
+                }
                 Err(CanvasRegistrationError::NotFound) => {
-                    // Use the method on the cloned connection instance
-                    connection_clone.notify_client(
-                        &format!("Canvas ID '{}' is invalid or does not exist.", canvas_uuid)
-                    ).await;
+                    connection_clone
+                        .notify_client(&format!(
+                            "Canvas ID '{}' is invalid or does not exist.",
+                            canvas_uuid
+                        ))
+                        .await;
                     tracing::error!("Canvas ID '{}' is invalid or does not exist.", canvas_uuid);
-                    return; 
-                },
-                Err(_e) => {
-                    // Use the method on the cloned connection instance
-                    connection_clone.notify_client(
-                        "A database error occurred. Cannot subscribe to canvas."
-                    ).await;
+                    return;
+                }
+                Err(_) => {
+                    connection_clone
+                        .notify_client("A database error occurred. Cannot subscribe to canvas.")
+                        .await;
                     tracing::error!("A database error occurred. Cannot subscribe to canvas.");
                     return;
                 }
-                }
             }
-            
-            // Get a mutable reference to the CanvasState (guaranteed to exist now)
-            let state = manager_lock
-                .get_mut(&canvas_uuid)
-                .expect("CanvasState must exist after check/insert.");
-            
-            // Get the file path from the existing state
-            file_path = state.file_path.clone();
-            state
-        };
+        }
+
+        // Now the state is guaranteed to exist
+        let canvas_state = manager_lock
+            .get_mut(&canvas_uuid)
+            .expect("CanvasState must exist after check/insert.");
+
+        let file_path = canvas_state.file_path.clone();
 
         // Add the connection info to the set.
         let connection_info = ConnectionInfo { user_id, connection };
@@ -210,14 +216,16 @@ impl CanvasManager {
             canvas_state.is_moderated
         );
 
-        // FINAL STEP: Send history to the newly connected client
+        // Send history to the newly connected client
         Self::send_canvas_history(
-            &connection_info.connection, // Use the connection added to the set
+            &connection_info.connection,
             &file_path,
             &canvas_uuid,
-            canvas_state.is_moderated
-        ).await;
+            canvas_state.is_moderated,
+        )
+        .await;
     }
+
 
     /// Unregisters a specific connection from a canvas.
     pub async fn unregister_connection(
@@ -383,7 +391,6 @@ impl CanvasManager {
     /// Sends a message to all active subscribers of a canvas.
     pub async fn broadcast(&self, canvas_uuid: &str, message: Message) {
 
-        tracing::warn!("Attempted to broadcast ");
 
         let map = self.inner.read().await;
         
