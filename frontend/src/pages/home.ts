@@ -41,6 +41,12 @@ export function renderHome() {
       <div style="flex: 1; padding-left: 10px;">
         <h3>User Options</h3>
 
+        <!-- User Info -->
+        <section class="home-section">
+          <h4>Your Info</h4>
+          <div><b>User ID:</b> <span id="user-id"></span></div>
+        </section>
+
         <!-- Create new canvas -->
         <section class="home-section">
           <h4>Create New Canvas</h4>
@@ -133,6 +139,10 @@ export function renderHome() {
       const user: UserInfo = await getUserInfo();
       updateEmail.value = user.email;
       updateDisplay.value = user.display_name;
+
+      // ✅ Display user_id
+      const userIdSpan = document.getElementById("user-id")!;
+      userIdSpan.textContent = user.user_id;
     } catch (err) {
       console.error(err);
     }

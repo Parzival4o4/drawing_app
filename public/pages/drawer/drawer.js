@@ -1,11 +1,7 @@
 import menuApi from './menuApi.js';
 import { LinkedListMap } from './LinkedListMap.js';
-// TODO add the user id to the event id generation
-// TODO create ws connection to backend 
 // TODO if ws connection fails stop working and retry connection
-// TODO register for the canvas (with get state option)
 // TODO send all events to server 
-// TODO recive events from server 
 // TODO unregister when switching the page (dont forget the go back navigation of the browser)
 // TODO implement user premission controll 
 // TODO implement moderation 

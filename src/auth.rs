@@ -57,14 +57,13 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         if let Some(claims) = parts.extensions.get::<Claims>() {
-            tracing::debug!("Claims found in extensions, skipping decode");
             return Ok(claims.clone());
         }
 
         let cookies = parts.headers.get(COOKIE)
             .and_then(|hdr| hdr.to_str().ok())
             .unwrap_or("");
-        tracing::debug!("Cookie header on request in from_request_parts: {:?}", cookies);
+        // tracing::debug!("Cookie header on request in from_request_parts: {:?}", cookies);
 
         let token = cookies
             .split(';')
@@ -77,7 +76,7 @@ where
                 }
             })
             .ok_or_else(|| {
-                tracing::debug!("No auth_token cookie found");
+                // tracing::debug!("No auth_token cookie found");
                 AuthError::MissingCredentials // Use AuthError here
             })?;
 
@@ -158,10 +157,10 @@ pub async fn auth_middleware(
         Ok(mut claims) => {
             // Hard expiration check
             if claims.exp <= now {
-                tracing::debug!(
-                    "Token for user_id={} expired at {}. URI: {:?}.",
-                    claims.user_id, claims.exp, req.uri()
-                );
+                // tracing::debug!(
+                //     "Token for user_id={} expired at {}. URI: {:?}.",
+                //     claims.user_id, claims.exp, req.uri()
+                // );
                 return AuthError::MissingCredentials.into_response(); // Return an error instead of a redirect
             }
 
@@ -170,10 +169,10 @@ pub async fn auth_middleware(
             let refresh_list_entry = refresh_list.consume_refresh_request(claims.user_id).await;
 
             if soft_expired || refresh_list_entry {
-                tracing::debug!(
-                    "Token for user_id={} needs refresh. soft_expired={}, refresh_list_entry={}, reissue_time={}, URI: {:?}",
-                    claims.user_id, soft_expired, refresh_list_entry, claims.reissue_time, req.uri()
-                );
+                // tracing::debug!(
+                //     "Token for user_id={} needs refresh. soft_expired={}, refresh_list_entry={}, reissue_time={}, URI: {:?}",
+                //     claims.user_id, soft_expired, refresh_list_entry, claims.reissue_time, req.uri()
+                // );
                 
                 let partial_claims = PartialClaims {
                     email: claims.email.clone(),
@@ -194,10 +193,10 @@ pub async fn auth_middleware(
                             );
                             return AuthError::TokenCreation.into_response(); // Return an error
                         }
-                        tracing::debug!(
-                            "Issued refreshed token for user_id={} (new reissue_time={}).",
-                            claims.user_id, claims.reissue_time
-                        );
+                        // tracing::debug!(
+                        //     "Issued refreshed token for user_id={} (new reissue_time={}).",
+                        //     claims.user_id, claims.reissue_time
+                        // );
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -215,19 +214,14 @@ pub async fn auth_middleware(
             );
 
             req.extensions_mut().insert(claims);
-            tracing::debug!("running handler now");
             let mut response = next.run(req).await;
-            tracing::debug!("running handler done");
 
             // Add refreshed cookie if needed
             if let Some(cookie_headers) = set_cookie_header {
                 if !response.headers().contains_key(axum::http::header::SET_COOKIE) {
-                    tracing::debug!("response does not yet contain a cookie");
                     for (name, value) in cookie_headers.iter() {
                         response.headers_mut().insert(name, value.clone());
                     }
-                } else {
-                    tracing::debug!("response already contains a cookie");
                 }
             }
             response

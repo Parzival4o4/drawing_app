@@ -13,7 +13,10 @@ use dotenvy::dotenv;
 // Import modules
 mod auth;
 mod handlers;
-mod ws_stuff;
+mod websocket_handlers;
+mod socket_claims_manager;
+mod canvas_manager;
+mod identifiable_web_socket;
 
 // Re-export types from auth and handlers for main's use
 use auth::{auth_middleware, PermissionRefreshList}; // Only need auth_middleware from auth
@@ -21,7 +24,13 @@ use handlers::{
     get_user_info, update_profile};
 use std::sync::Arc;
 
-use crate::{auth::start_cleanup_task, handlers::{create_canvas, get_canvas_list, get_canvas_permissions, login, logout, register, update_canvas_permissions}, ws_stuff::{ws_handler, CanvasManager, WebSocketConnections}};
+use crate::{
+    auth::start_cleanup_task, 
+    handlers::{create_canvas, get_canvas_list, get_canvas_permissions, login, logout, register, update_canvas_permissions}, 
+    websocket_handlers::{ws_handler},
+    socket_claims_manager::{ SocketClaimsManager},
+    canvas_manager::{CanvasManager}
+};
 
 // ───── 1. Constants / statics ──────────────
 // Corrected LazyLock type annotation
@@ -38,8 +47,9 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub struct AppState {
     pub pool: SqlitePool,
     pub permission_refresh_list: Arc<PermissionRefreshList>,
-    pub active_connections: WebSocketConnections,
+    // pub active_connections: WebSocketConnections,
     pub canvas_manager: CanvasManager,
+    pub socket_claims_manager: SocketClaimsManager,
 }
 
 // ───── Main entrypoint ──────────────────
@@ -50,14 +60,14 @@ async fn main() {
     let permission_refresh_list = Arc::new(PermissionRefreshList::new());
 
     // Initialize the WebSocketConnections and CanvasManager structs
-    let active_connections = WebSocketConnections::new();
     let canvas_manager = CanvasManager::new();
+    let socket_claims_manager = SocketClaimsManager::new();
 
     let app_state = AppState {
         pool: pool.clone(),
         permission_refresh_list: permission_refresh_list.clone(),
-        active_connections: active_connections.clone(),
         canvas_manager: canvas_manager.clone(),
+        socket_claims_manager: socket_claims_manager.clone()
     };
 
     tokio::spawn(start_cleanup_task(permission_refresh_list.clone()));

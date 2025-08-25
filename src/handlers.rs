@@ -213,7 +213,7 @@ pub async fn create_canvas(
         }
     };
     
-    state.active_connections.update_user_claims(claims.user_id, updated_claims.clone()).await;
+    state.socket_claims_manager.update_claims(claims.user_id, updated_claims.clone()).await;
 
     match get_cookie_from_claims(updated_claims).await {
         Ok(cookie) => {
@@ -244,90 +244,203 @@ pub struct UpdatePermissionRequest {
 struct GenericResponse {
     message: String,
 }
+// New helper function to remove a user's permissions from a canvas
+async fn remove_user_canvas_permissions(
+    pool: &SqlitePool,
+    canvas_id: &str,
+    user_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "DELETE FROM Canvas_Permissions WHERE canvas_id = ? AND user_id = ?",
+        canvas_id,
+        user_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 
 pub async fn update_canvas_permissions(
     claims: Claims,
     State(state): State<AppState>,
-    Path(canvas_id): Path<String>, // Correct usage for path parameter
+    Path(canvas_id): Path<String>,
     Json(payload): Json<UpdatePermissionRequest>,
 ) -> impl IntoResponse {
     // 1. Get acting user's permission
     let acting_user_permission = claims.canvas_permissions.get(&canvas_id);
 
-    // 2. Check if the acting user is trying to change their own permissions
+    // 2. Prevent self-modification
     if claims.user_id == payload.user_id {
-        tracing::warn!("User {} tried to change their own permissions on canvas {}.", claims.user_id, canvas_id);
+        tracing::warn!(
+            "User {} tried to change their own permissions on canvas {}.",
+            claims.user_id, canvas_id
+        );
         return (
             axum::http::StatusCode::FORBIDDEN,
-            Json(GenericResponse { message: "Cannot change your own permissions.".to_string() }),
-        ).into_response();
+            Json(GenericResponse {
+                message: "Cannot change your own permissions.".to_string(),
+            }),
+        )
+            .into_response();
     }
 
-    // 3. Get the target user's current permission from the DB
-    let target_user_permission = get_user_canvas_permissions_from_db(&state.pool, &canvas_id, payload.user_id).await;
-    
-    // 4. Check if the target user is the owner ("O"). No one can change the owner's permissions.
+    // 3. Get target user's current permission
+    let target_user_permission =
+        get_user_canvas_permissions_from_db(&state.pool, &canvas_id, payload.user_id).await;
+
+    // 4. Disallow modifying the owner
     if let Some(target_permission) = &target_user_permission {
         if target_permission == "O" {
-            tracing::warn!("User {} tried to change the owner's permissions on canvas {}.", claims.user_id, canvas_id);
+            tracing::warn!(
+                "User {} tried to change the owner's permissions on canvas {}.",
+                claims.user_id, canvas_id
+            );
             return (
                 axum::http::StatusCode::FORBIDDEN,
-                Json(GenericResponse { message: "Cannot change the owner's permissions.".to_string() }),
-            ).into_response();
+                Json(GenericResponse {
+                    message: "Cannot change the owner's permissions.".to_string(),
+                }),
+            )
+                .into_response();
         }
     }
 
-    // 5. Check if the acting user has the right to change permissions
+    // 5. Permission check
     let can_change = match acting_user_permission.map(|p| p.as_str()) {
-        Some("C") | Some("O") => true, // "C" and "O" can change any permission
+        Some("C") | Some("O") => true,
         Some("M") => {
-            // "M" can't assign "C" or "M"
-            !matches!(payload.permission.as_str(), "C" | "M") && !matches!(target_user_permission.as_deref(), Some("C") | Some("O") | Some("M"))
+            !matches!(payload.permission.as_str(), "C" | "M")
+                && !matches!(
+                    target_user_permission.as_deref(),
+                    Some("C") | Some("O") | Some("M")
+                )
         }
         _ => {
-            tracing::warn!("User {} does not have sufficient permission to change permissions on canvas {}.", claims.user_id, canvas_id);
+            tracing::warn!(
+                "User {} does not have sufficient permission to change permissions on canvas {}.",
+                claims.user_id,
+                canvas_id
+            );
             return (
                 axum::http::StatusCode::FORBIDDEN,
-                Json(GenericResponse { message: "Insufficient permissions.".to_string() }),
-            ).into_response();
+                Json(GenericResponse {
+                    message: "Insufficient permissions.".to_string(),
+                }),
+            )
+                .into_response();
         }
     };
 
     if !can_change {
-        tracing::warn!("Permission check failed for user {} on canvas {}. New permission: {}, Target current: {:?}",
-            claims.user_id, canvas_id, payload.permission, target_user_permission);
+        tracing::warn!(
+            "Permission check failed for user {} on canvas {}. New permission: {}, Target current: {:?}",
+            claims.user_id,
+            canvas_id,
+            payload.permission,
+            target_user_permission
+        );
         return (
             axum::http::StatusCode::FORBIDDEN,
-            Json(GenericResponse { message: "Insufficient permissions for this action.".to_string() }),
-        ).into_response();
+            Json(GenericResponse {
+                message: "Insufficient permissions for this action.".to_string(),
+            }),
+        )
+            .into_response();
     }
-    
-    // 6. Update the DB
-    match update_user_canvas_permissions(&state.pool, &canvas_id, payload.user_id, &payload.permission).await {
-        Ok(_) => {
-            tracing::info!("Permissions for user {} on canvas {} updated to {}.", payload.user_id, canvas_id, payload.permission);
-            
-            // 7. Mark the user for a state refresh
-            state.permission_refresh_list.mark_user_for_refresh(payload.user_id).await;
-            
-            // 8. Call the permission_update function on the WebSocketConnections
-            // This will be implemented later to propagate the changes.
-            state.active_connections.permission_update(&state, payload.user_id).await;
-            
-            (
-                axum::http::StatusCode::OK,
-                Json(GenericResponse { message: "Permissions updated successfully.".to_string() }),
-            ).into_response()
+
+    // 6. Update/remove DB permissions
+    let mut removed = false;
+    if payload.permission.is_empty() {
+        match remove_user_canvas_permissions(&state.pool, &canvas_id, payload.user_id).await {
+            Ok(_) => {
+                tracing::info!(
+                    "Permissions for user {} on canvas {} removed.",
+                    payload.user_id,
+                    canvas_id
+                );
+                removed = true;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to remove permissions for user {} on canvas {}: {}",
+                    payload.user_id,
+                    canvas_id,
+                    e
+                );
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(GenericResponse {
+                        message: "Failed to remove permissions.".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
         }
-        Err(e) => {
-            tracing::error!("Failed to update permissions for user {} on canvas {}: {}", payload.user_id, canvas_id, e);
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(GenericResponse { message: "Failed to update permissions.".to_string() }),
-            ).into_response()
+    } else {
+        match update_user_canvas_permissions(
+            &state.pool,
+            &canvas_id,
+            payload.user_id,
+            &payload.permission,
+        )
+        .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    "Permissions for user {} on canvas {} updated to {}.",
+                    payload.user_id,
+                    canvas_id,
+                    payload.permission
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to update permissions for user {} on canvas {}: {}",
+                    payload.user_id,
+                    canvas_id,
+                    e
+                );
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(GenericResponse {
+                        message: "Failed to update permissions.".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
         }
     }
+
+    // 7. Mark user for refresh
+    state.permission_refresh_list.mark_user_for_refresh(payload.user_id).await;
+
+    // 8. Refresh claims in SocketClaimsManager
+    state
+        .socket_claims_manager
+        .update_permissions(&state, payload.user_id)
+        .await;
+
+    // 9. Unregister only if permissions were removed
+    if removed {
+        state
+            .canvas_manager
+            .unregister_user(&canvas_id, payload.user_id)
+            .await;
+    }
+
+    // 10. Return success
+    (
+        axum::http::StatusCode::OK,
+        Json(GenericResponse {
+            message: "Permissions updated successfully.".to_string(),
+        }),
+    )
+        .into_response()
 }
+
+
 
 
 pub async fn get_user_canvas_permissions_from_db(
@@ -565,7 +678,7 @@ pub async fn update_profile(
     };
 
     // Step 3: Update claims in active WebSocket connections
-    state.active_connections.update_user_claims(claims.user_id, updated_claims.clone()).await;
+    state.socket_claims_manager.update_claims(claims.user_id, updated_claims.clone()).await;
 
     // Step 4: Create new cookie from updated claims
     match get_cookie_from_claims(updated_claims).await {
