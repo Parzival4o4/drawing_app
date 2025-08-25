@@ -1045,45 +1045,71 @@ import { BackendSync } from "./BackendSync.js";
 
 
 // ---------------- Handlers ----------------
-const createBackendHandlers = (toolsWrapper: HTMLElement) => {
-    // Message div
+const createBackendHandlers = (toolsWrapper: HTMLElement, moderationContainer: HTMLElement, backendSync: BackendSync) => {
+    // Message div for tools
     const messageDiv = document.createElement("div");
     messageDiv.style.color = "red";
     messageDiv.style.marginBottom = "8px";
     messageDiv.style.fontSize = "0.9em";
-    messageDiv.style.display = "none"; // hide initially
+    messageDiv.style.display = "none";
     toolsWrapper.appendChild(messageDiv);
+
+    // Toggle button for moderation
+    const moderationToggle = document.createElement("button");
+    moderationToggle.textContent = "Toggle Moderation";
+    moderationToggle.style.display = "none";
+    moderationToggle.style.marginTop = "8px";
+    moderationContainer.appendChild(moderationToggle);
+
+    // Call the BackendSync method when the button is clicked
+    moderationToggle.addEventListener("click", () => {
+        backendSync.sendToggleModeratedCommand();
+    });
 
     return {
         setEditingPower(canEdit: boolean) {
             if (canEdit) {
-                // Show all buttons
                 Array.from(toolsWrapper.children).forEach((child) => {
                     if (child !== messageDiv) (child as HTMLElement).style.display = "";
                 });
                 messageDiv.style.display = "none";
             } else {
-                // Hide buttons
                 Array.from(toolsWrapper.children).forEach((child) => {
                     if (child !== messageDiv) (child as HTMLElement).style.display = "none";
                 });
-                // Show message
                 messageDiv.textContent = "⚠ You cannot edit the canvas right now.";
                 messageDiv.style.display = "block";
             }
         },
-        setModerationState(isModerated: boolean) { console.log("Moderation state:", isModerated); },
-        setModerationPower(canToggle: boolean) { console.log("Can toggle moderation:", canToggle); },
+        setModerationState(isModerated: boolean) {
+            if (isModerated) {
+                moderationContainer.textContent = "🔴 Moderated";
+                moderationContainer.style.color = "red";
+                moderationContainer.style.fontWeight = "bold";
+            } else {
+                moderationContainer.textContent = "🟢 Not Moderated";
+                moderationContainer.style.color = "green";
+                moderationContainer.style.fontWeight = "bold";
+            }
+            moderationContainer.appendChild(moderationToggle);
+        },
+        setModerationPower(canToggle: boolean) {
+            if (canToggle) {
+                moderationToggle.style.display = "block";
+            } else {
+                moderationToggle.style.display = "none";
+            }
+        },
     };
 };
 
 
-
 export function setupDrawer(
     canvasDomElm: HTMLCanvasElement,
-    toolElm: HTMLElement,            // parent div
+    toolElm: HTMLElement,
     textAreaDomElm: HTMLTextAreaElement,
     buttonDomElm: HTMLButtonElement,
+    moderationElm: HTMLElement,
     canvasId: string,
     userId: string
 ) {
@@ -1092,9 +1118,8 @@ export function setupDrawer(
     const es = new EventSystem();
     let canvas: Canvas;
 
-    const toolsContainer = toolElm; // already the .tools div
+    const toolsContainer = toolElm;
 
-    // Create a new wrapper inside the tools container
     const toolWrapper = document.createElement("div");
     toolsContainer.appendChild(toolWrapper);
 
@@ -1138,7 +1163,7 @@ export function setupDrawer(
         },
     };
 
- const toolSelector: ShapeFactory[] = [
+    const toolSelector: ShapeFactory[] = [
         new LineFactory(sm),
         new CircleFactory(sm),
         new RectangleFactory(sm),
@@ -1146,10 +1171,8 @@ export function setupDrawer(
         new SelectTool(sm),
     ];
 
-    // Pass the new wrapper to ToolArea
     const toolArea = new ToolArea(toolSelector, toolWrapper);
 
-    // Add spacing between buttons
     const toolButtons = toolWrapper.querySelectorAll("li");
     toolButtons.forEach((btn) => (btn as HTMLElement).style.marginBottom = "6px");
 
@@ -1158,9 +1181,14 @@ export function setupDrawer(
 
     const esui = new EventSystemUI(es, canvas, textAreaDomElm, buttonDomElm);
 
-    // Pass the new wrapper to the handlers
-    const handlers = createBackendHandlers(toolWrapper);
-    new BackendSync(es, canvas, canvasId, handlers);
+    // Create the BackendSync instance with 3 arguments
+    const backendSync = new BackendSync(es, canvas, canvasId);
+
+    // Pass the BackendSync instance to the handlers
+    const handlers = createBackendHandlers(toolWrapper, moderationElm, backendSync);
+
+    // Set the handlers on the BackendSync instance
+    backendSync.setHandlers(handlers);
 
     setupPopup(sm, canvas, canvasDomElm);
 }

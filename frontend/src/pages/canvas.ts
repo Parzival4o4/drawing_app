@@ -6,31 +6,24 @@ export function renderCanvasPage(canvasId: string, userId: string) {
   app.innerHTML = `
     <h2>Canvas</h2>
     <div style="display: flex; gap: 20px;">
-      <!-- Sidebar -->
-      <div style="flex: 0 0 260px; border-right: 1px solid #ccc; padding-right: 10px;">
+            <div style="flex: 0 0 260px; border-right: 1px solid #ccc; padding-right: 10px;">
         <button id="home-btn" class="nav-btn">🏠 Home</button>
 
-        <!-- Tools -->
-        <h3>Tools</h3>
+                <h3>Tools</h3>
         <div class="tools"></div>
 
-        <!-- Moderation section -->
-        <h3 style="margin-top: 20px;">Moderation</h3>
+                <h3 style="margin-top: 20px;">Moderation</h3>
         <div id="moderation-container" style="font-size: 0.9em;">
-          <!-- TS will populate this -->
-        </div>
+                  </div>
 
-        <!-- Permissions section -->
-        <h3 style="margin-top: 20px;">Permissions</h3>
+                <h3 style="margin-top: 20px;">Permissions</h3>
         <div id="permissions-container" style="font-size: 0.9em;"></div>
       </div>
 
-      <!-- Drawing area -->
-      <div style="flex: 1; padding-left: 10px;">
+            <div style="flex: 1; padding-left: 10px;">
         <canvas id="drawArea" width="1024" height="768" style="border:1px solid #ccc;"></canvas>
 
-        <!-- Event log UI -->
-        <div style="margin-top: 10px;">
+                <div style="margin-top: 10px;">
           <textarea id="textarea" cols="130" rows="10" name="event_log"></textarea>
           <br/>
           <button id="button" type="button">Load</button>
@@ -52,8 +45,9 @@ export function renderCanvasPage(canvasId: string, userId: string) {
         const toolsElm = document.querySelector(".tools") as HTMLElement;
         const textAreaElm = document.getElementById("textarea") as HTMLTextAreaElement;
         const buttonElm = document.getElementById("button") as HTMLButtonElement;
+        const moderationElm = document.getElementById("moderation-container") as HTMLElement;
 
-        mod.setupDrawer(canvasElm, toolsElm, textAreaElm, buttonElm, canvasId, userId);
+        mod.setupDrawer(canvasElm, toolsElm, textAreaElm, buttonElm, moderationElm, canvasId, userId);
       }
     })
     .catch((err) => {

@@ -3,15 +3,14 @@ export class BackendSync {
     canvas;
     canvasId;
     socket;
-    handlers;
+    handlers = {};
     // track current backend state
     moderationState = false;
     userPermission = null;
-    constructor(es, canvas, canvasId, handlers = {}) {
+    constructor(es, canvas, canvasId) {
         this.es = es;
         this.canvas = canvas;
         this.canvasId = canvasId;
-        this.handlers = handlers;
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = window.location.host;
         const url = `${protocol}//${host}/ws`;
@@ -26,6 +25,26 @@ export class BackendSync {
         this.socket.addEventListener("error", (err) => console.error("[BackendSync] Socket error:", err));
         // Forward local events to backend only (do NOT apply here)
         this.es.register((event) => this.send(event));
+    }
+    /**
+     * Public method to set the UI handlers after the instance is created.
+     * @param handlers
+     */
+    setHandlers(handlers) {
+        this.handlers = handlers;
+    }
+    // New method to send a command to toggle moderation
+    sendToggleModeratedCommand() {
+        if (this.socket.readyState !== WebSocket.OPEN) {
+            console.warn("[BackendSync] Tried to send toggle command while socket not open.");
+            return;
+        }
+        const commandMessage = {
+            canvasId: this.canvasId,
+            command: "toggleModerated"
+        };
+        this.socket.send(JSON.stringify(commandMessage));
+        console.log("[BackendSync] Sent moderation toggle command.");
     }
     handleIncomingMessage(data) {
         try {
