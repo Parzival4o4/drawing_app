@@ -98,54 +98,75 @@ impl CanvasManager {
 
 
     // Helper function to read history and send moderation state first
-async fn send_canvas_history(
-    connection: &IdentifiableWebSocket,
-    file_path: &PathBuf,
-    canvas_uuid: &str,
-    is_moderated: bool,
-) {
-    // 1. Send moderation state
-    let moderated_msg = json!({
-        "canvasId": canvas_uuid,
-        "moderated": is_moderated
-    });
+    async fn send_canvas_history(
+        connection: &IdentifiableWebSocket,
+        file_path: &PathBuf,
+        canvas_uuid: &str,
+        is_moderated: bool,
+        your_permission: &str,   // ⬅️ NEW: pass user’s permission here
+    ) {
+        // 1. Send moderation state
+        let moderated_msg = json!({
+            "canvasId": canvas_uuid,
+            "moderated": is_moderated
+        });
 
-    if let Err(e) = connection.send(Message::Text(moderated_msg.to_string().into())).await {
-        tracing::error!("Failed to send moderation state to client {}: {}", connection.id, e);
-    }
+        if let Err(e) = connection.send(Message::Text(moderated_msg.to_string().into())).await {
+            tracing::error!("Failed to send moderation state to client {}: {}", connection.id, e);
+        }
 
-    // 2. Send history
-    match tokio::fs::read_to_string(file_path).await {
-        Ok(content) => {
-            let mut events = Vec::new();
+        // 2. Send history
+        match tokio::fs::read_to_string(file_path).await {
+            Ok(content) => {
+                let mut events = Vec::new();
 
-            for line in content.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
+                for line in content.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
 
-                match serde_json::from_str::<serde_json::Value>(line) {
-                    Ok(value) => events.push(value),
-                    Err(e) => {
-                        tracing::warn!("Skipping invalid line in canvas {} history: {}", canvas_uuid, e);
+                    match serde_json::from_str::<serde_json::Value>(line) {
+                        Ok(value) => events.push(value),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Skipping invalid line in canvas {} history: {}",
+                                canvas_uuid, e
+                            );
+                        }
                     }
                 }
-            }
 
-            let history_message = json!({
-                "canvasId": canvas_uuid,
-                "eventsForCanvas": events
-            });
+                let history_message = json!({
+                    "canvasId": canvas_uuid,
+                    "eventsForCanvas": events
+                });
 
-            if let Err(e) = connection.send(Message::Text(history_message.to_string().into())).await {
-                tracing::error!("Failed to send history to client {}: {}", connection.id, e);
+                if let Err(e) = connection.send(Message::Text(history_message.to_string().into())).await {
+                    tracing::error!("Failed to send history to client {}: {}", connection.id, e);
+                }
             }
-        },
-        Err(_) => {
-            connection.notify_client("Failed to load canvas history. Try refreshing.").await;
+            Err(_) => {
+                connection
+                    .notify_client("Failed to load canvas history. Try refreshing.")
+                    .await;
+            }
+        }
+
+        // 3. Send permission
+        let permission_msg = json!({
+            "canvasId": canvas_uuid,
+            "yourPermission": your_permission
+        });
+
+        if let Err(e) = connection.send(Message::Text(permission_msg.to_string().into())).await {
+            tracing::error!(
+                "Failed to send permission to client {}: {}",
+                connection.id,
+                e
+            );
         }
     }
-}
+
 
 
 
@@ -162,6 +183,24 @@ async fn send_canvas_history(
         connection: IdentifiableWebSocket,
     ) {
         let connection_clone = connection.clone(); // Clone for error path and final insertion
+
+        // === Check permissions before anything else ===
+        let perm = app_state
+            .socket_claims_manager
+            .get_permission_level(user_id, &canvas_uuid.clone())
+            .await;
+
+        if perm.is_empty() {
+            connection_clone
+                .notify_client("You do not have permission to access this canvas.")
+                .await;
+            tracing::warn!(
+                "User {} tried to register to canvas {} without permission",
+                user_id,
+                canvas_uuid
+            );
+            return;
+        }
 
         // Acquire write lock on the manager's HashMap
         let mut manager_lock = self.inner.write().await;
@@ -213,18 +252,20 @@ async fn send_canvas_history(
             canvas_uuid,
             connection_info.connection.id,
             canvas_state.subscribers.len(),
-            canvas_state.is_moderated
+            canvas_state.is_moderated,
         );
 
-        // Send history to the newly connected client
+        // Send moderation, history, and permissions to the client
         Self::send_canvas_history(
             &connection_info.connection,
             &file_path,
             &canvas_uuid,
             canvas_state.is_moderated,
+            &perm, 
         )
         .await;
     }
+
 
 
     /// Unregisters a specific connection from a canvas.

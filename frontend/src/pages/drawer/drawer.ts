@@ -1044,79 +1044,123 @@ function setupPopup(
 import { BackendSync } from "./BackendSync.js";
 
 
+// ---------------- Handlers ----------------
+const createBackendHandlers = (toolsWrapper: HTMLElement) => {
+    // Message div
+    const messageDiv = document.createElement("div");
+    messageDiv.style.color = "red";
+    messageDiv.style.marginBottom = "8px";
+    messageDiv.style.fontSize = "0.9em";
+    messageDiv.style.display = "none"; // hide initially
+    toolsWrapper.appendChild(messageDiv);
+
+    return {
+        setEditingPower(canEdit: boolean) {
+            if (canEdit) {
+                // Show all buttons
+                Array.from(toolsWrapper.children).forEach((child) => {
+                    if (child !== messageDiv) (child as HTMLElement).style.display = "";
+                });
+                messageDiv.style.display = "none";
+            } else {
+                // Hide buttons
+                Array.from(toolsWrapper.children).forEach((child) => {
+                    if (child !== messageDiv) (child as HTMLElement).style.display = "none";
+                });
+                // Show message
+                messageDiv.textContent = "⚠ You cannot edit the canvas right now.";
+                messageDiv.style.display = "block";
+            }
+        },
+        setModerationState(isModerated: boolean) { console.log("Moderation state:", isModerated); },
+        setModerationPower(canToggle: boolean) { console.log("Can toggle moderation:", canToggle); },
+    };
+};
+
+
+
 export function setupDrawer(
-  canvasDomElm: HTMLCanvasElement,
-  menuElm: HTMLElement,
-  textAreaDomElm: HTMLTextAreaElement,
-  buttonDomElm: HTMLButtonElement,
-  canvasId: string,
-  userId: string
+    canvasDomElm: HTMLCanvasElement,
+    toolElm: HTMLElement,            // parent div
+    textAreaDomElm: HTMLTextAreaElement,
+    buttonDomElm: HTMLButtonElement,
+    canvasId: string,
+    userId: string
 ) {
-  AbstractShape.setUserId(userId);
+    AbstractShape.setUserId(userId);
 
-  const es = new EventSystem();
+    const es = new EventSystem();
+    let canvas: Canvas;
 
-  let canvas: Canvas; // declare first so closures can reference it
+    const toolsContainer = toolElm; // already the .tools div
 
-  const sm: ShapeManager = {
-    addShape(s, rd) {
-      es.apply({ type: "shapeAdded", shape: s, redraw: rd });
-      return this;
-    },
-    removeShape(s, rd) {
-      es.apply({ type: "shapeRemoved", shape: s, redraw: rd });
-      return this;
-    },
-    removeShapeWithId(id, rd) {
-      es.apply({ type: "shapeRemovedWithId", shapeId: id, redraw: rd });
-      return this;
-    },
-    replaceShape(oldId: string, newShape: Shape, redraw?: boolean) {
-      es.apply({ type: "shapeReplaced", oldId, shape: newShape, redraw: redraw });
-      return this;
-    },
-    bringSelectedToFront(redraw) {
-      es.apply({ type: "selectedBroughtToFront", redraw: redraw ?? true });
-      return this;
-    },
-    sendSelectedToBack(redraw) {
-      es.apply({ type: "selectedBroughtToBack", redraw: redraw ?? true });
-      return this;
-    },
-    selectShapeById(id, additive) {
-      es.apply({ type: "shapeSelected", id, additive });
-      return this;
-    },
-    getShapeIdsAtPoint(x, y): string[] {
-      return canvas.getShapeIdsAtPoint(x, y);
-    },
-    getSelectedIds() {
-      return canvas.getSelectedIds();
-    },
-    getShapeWithId(id: string): Shape {
-      return canvas.getShapeWithId(id);
-    },
-  };
+    // Create a new wrapper inside the tools container
+    const toolWrapper = document.createElement("div");
+    toolsContainer.appendChild(toolWrapper);
 
-  const toolSelector: ShapeFactory[] = [
-    new LineFactory(sm),
-    new CircleFactory(sm),
-    new RectangleFactory(sm),
-    new TriangleFactory(sm),
-    new SelectTool(sm),
-  ];
+    const sm: ShapeManager = {
+        addShape(s, rd) {
+            es.apply({ type: "shapeAdded", shape: s, redraw: rd });
+            return this;
+        },
+        removeShape(s, rd) {
+            es.apply({ type: "shapeRemoved", shape: s, redraw: rd });
+            return this;
+        },
+        removeShapeWithId(id, rd) {
+            es.apply({ type: "shapeRemovedWithId", shapeId: id, redraw: rd });
+            return this;
+        },
+        replaceShape(oldId: string, newShape: Shape, redraw?: boolean) {
+            es.apply({ type: "shapeReplaced", oldId, shape: newShape, redraw: redraw });
+            return this;
+        },
+        bringSelectedToFront(redraw) {
+            es.apply({ type: "selectedBroughtToFront", redraw: redraw ?? true });
+            return this;
+        },
+        sendSelectedToBack(redraw) {
+            es.apply({ type: "selectedBroughtToBack", redraw: redraw ?? true });
+            return this;
+        },
+        selectShapeById(id, additive) {
+            es.apply({ type: "shapeSelected", id, additive });
+            return this;
+        },
+        getShapeIdsAtPoint(x, y): string[] {
+            return canvas.getShapeIdsAtPoint(x, y);
+        },
+        getSelectedIds() {
+            return canvas.getSelectedIds();
+        },
+        getShapeWithId(id: string): Shape {
+            return canvas.getShapeWithId(id);
+        },
+    };
 
-  const toolArea = new ToolArea(toolSelector, menuElm);
+ const toolSelector: ShapeFactory[] = [
+        new LineFactory(sm),
+        new CircleFactory(sm),
+        new RectangleFactory(sm),
+        new TriangleFactory(sm),
+        new SelectTool(sm),
+    ];
 
-  // ✅ Create canvas before BackendSync
-  canvas = new Canvas(canvasDomElm, toolArea);
-  canvas.draw();
+    // Pass the new wrapper to ToolArea
+    const toolArea = new ToolArea(toolSelector, toolWrapper);
 
-  // Hook textarea/logger etc.
-  const esui = new EventSystemUI(es, canvas, textAreaDomElm, buttonDomElm);
+    // Add spacing between buttons
+    const toolButtons = toolWrapper.querySelectorAll("li");
+    toolButtons.forEach((btn) => (btn as HTMLElement).style.marginBottom = "6px");
 
-  // ✅ Now it’s safe to create BackendSync (canvas exists)
-  new BackendSync(es, canvas, canvasId);
+    canvas = new Canvas(canvasDomElm, toolArea);
+    canvas.draw();
 
-  setupPopup(sm, canvas, canvasDomElm);
+    const esui = new EventSystemUI(es, canvas, textAreaDomElm, buttonDomElm);
+
+    // Pass the new wrapper to the handlers
+    const handlers = createBackendHandlers(toolWrapper);
+    new BackendSync(es, canvas, canvasId, handlers);
+
+    setupPopup(sm, canvas, canvasDomElm);
 }

@@ -777,10 +777,49 @@ function setupPopup(sm, canvas, canvasDomElm) {
     });
 }
 import { BackendSync } from "./BackendSync.js";
-export function setupDrawer(canvasDomElm, menuElm, textAreaDomElm, buttonDomElm, canvasId, userId) {
+// ---------------- Handlers ----------------
+const createBackendHandlers = (toolsWrapper) => {
+    // Message div
+    const messageDiv = document.createElement("div");
+    messageDiv.style.color = "red";
+    messageDiv.style.marginBottom = "8px";
+    messageDiv.style.fontSize = "0.9em";
+    messageDiv.style.display = "none"; // hide initially
+    toolsWrapper.appendChild(messageDiv);
+    return {
+        setEditingPower(canEdit) {
+            if (canEdit) {
+                // Show all buttons
+                Array.from(toolsWrapper.children).forEach((child) => {
+                    if (child !== messageDiv)
+                        child.style.display = "";
+                });
+                messageDiv.style.display = "none";
+            }
+            else {
+                // Hide buttons
+                Array.from(toolsWrapper.children).forEach((child) => {
+                    if (child !== messageDiv)
+                        child.style.display = "none";
+                });
+                // Show message
+                messageDiv.textContent = "⚠ You cannot edit the canvas right now.";
+                messageDiv.style.display = "block";
+            }
+        },
+        setModerationState(isModerated) { console.log("Moderation state:", isModerated); },
+        setModerationPower(canToggle) { console.log("Can toggle moderation:", canToggle); },
+    };
+};
+export function setupDrawer(canvasDomElm, toolElm, // parent div
+textAreaDomElm, buttonDomElm, canvasId, userId) {
     AbstractShape.setUserId(userId);
     const es = new EventSystem();
-    let canvas; // declare first so closures can reference it
+    let canvas;
+    const toolsContainer = toolElm; // already the .tools div
+    // Create a new wrapper inside the tools container
+    const toolWrapper = document.createElement("div");
+    toolsContainer.appendChild(toolWrapper);
     const sm = {
         addShape(s, rd) {
             es.apply({ type: "shapeAdded", shape: s, redraw: rd });
@@ -827,14 +866,17 @@ export function setupDrawer(canvasDomElm, menuElm, textAreaDomElm, buttonDomElm,
         new TriangleFactory(sm),
         new SelectTool(sm),
     ];
-    const toolArea = new ToolArea(toolSelector, menuElm);
-    // ✅ Create canvas before BackendSync
+    // Pass the new wrapper to ToolArea
+    const toolArea = new ToolArea(toolSelector, toolWrapper);
+    // Add spacing between buttons
+    const toolButtons = toolWrapper.querySelectorAll("li");
+    toolButtons.forEach((btn) => btn.style.marginBottom = "6px");
     canvas = new Canvas(canvasDomElm, toolArea);
     canvas.draw();
-    // Hook textarea/logger etc.
     const esui = new EventSystemUI(es, canvas, textAreaDomElm, buttonDomElm);
-    // ✅ Now it’s safe to create BackendSync (canvas exists)
-    new BackendSync(es, canvas, canvasId);
+    // Pass the new wrapper to the handlers
+    const handlers = createBackendHandlers(toolWrapper);
+    new BackendSync(es, canvas, canvasId, handlers);
     setupPopup(sm, canvas, canvasDomElm);
 }
 //# sourceMappingURL=drawer.js.map

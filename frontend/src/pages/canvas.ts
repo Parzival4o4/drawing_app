@@ -6,11 +6,19 @@ export function renderCanvasPage(canvasId: string, userId: string) {
   app.innerHTML = `
     <h2>Canvas</h2>
     <div style="display: flex; gap: 20px;">
-      <!-- Tools sidebar -->
+      <!-- Sidebar -->
       <div style="flex: 0 0 260px; border-right: 1px solid #ccc; padding-right: 10px;">
         <button id="home-btn" class="nav-btn">🏠 Home</button>
+
+        <!-- Tools -->
         <h3>Tools</h3>
         <div class="tools"></div>
+
+        <!-- Moderation section -->
+        <h3 style="margin-top: 20px;">Moderation</h3>
+        <div id="moderation-container" style="font-size: 0.9em;">
+          <!-- TS will populate this -->
+        </div>
 
         <!-- Permissions section -->
         <h3 style="margin-top: 20px;">Permissions</h3>
@@ -55,6 +63,7 @@ export function renderCanvasPage(canvasId: string, userId: string) {
   // === Permissions UI ===
   loadPermissions(canvasId, userId);
 }
+
 
 async function loadPermissions(canvasId: string, currentUserId: string) {
   const container = document.getElementById("permissions-container")!;
