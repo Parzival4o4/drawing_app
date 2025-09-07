@@ -1,17 +1,16 @@
 use std::{collections::HashMap, sync::Arc};
-
 use tokio::sync::RwLock;
+use crate::{auth::{get_claims, Claims, PartialClaims}, identifiable_web_socket::IdentifiableWebSocket, AppState};
+use serde_json::json;
+use axum::extract::ws::Message;
 
-use crate::{auth::{get_claims, Claims, PartialClaims}, AppState};
-
-// A tuple holding the user's claims and a counter for active connections
-// The counter is essential because a single user can have multiple WebSocket connections.
-pub type ClaimsCount = (Claims, usize);
+// A tuple holding the user's claims and a list of their active connections
+pub type ClaimsConnections = (Claims, Vec<IdentifiableWebSocket>);
 
 #[derive(Clone)]
 pub struct SocketClaimsManager {
-    // Key: user_id (i64), Value: (Claims, connection_count)
-    inner: Arc<RwLock<HashMap<i64, ClaimsCount>>>,
+    // Key: user_id (i64), Value: (Claims, Vec<IdentifiableWebSocket>)
+    inner: Arc<RwLock<HashMap<i64, ClaimsConnections>>>,
 }
 
 impl SocketClaimsManager {
@@ -23,19 +22,18 @@ impl SocketClaimsManager {
     }
 
     /// Adds a new connection for a user. If the user doesn't exist, their claims are added.
-    /// If the user already exists, only the connection count is incremented.
-    pub async fn add_connection_and_claims(&self, user_id: i64, claims: Claims) {
+    pub async fn add_connection_and_claims(&self, user_id: i64, claims: Claims, ws: IdentifiableWebSocket) {
         let mut map = self.inner.write().await;
         
         // Check if the user ID is already in the map.
-        if let Some((_, count)) = map.get_mut(&user_id) {
-            // User exists, so we just increment the connection count.
-            *count += 1;
-            tracing::debug!("User {} connected again. Total connections: {}", user_id, *count);
+        if let Some((_, connections)) = map.get_mut(&user_id) {
+            // User exists, so we just add the new connection to their list.
+            connections.push(ws);
+            tracing::debug!("User {} connected again. Total connections: {}", user_id, connections.len());
         } else {
-            // New user, so we insert the claims and set the count to 1.
+            // New user, so we insert the claims and the new connection.
             tracing::info!("First connection for user {}.", user_id);
-            map.insert(user_id, (claims, 1));
+            map.insert(user_id, (claims, vec![ws]));
         }
     }
 
@@ -53,71 +51,73 @@ impl SocketClaimsManager {
         }
     }
 
-
-    /// Refresh a user's claims by reloading permissions from the database.
-    /// If the user is not connected, nothing happens.
+    /// Refresh a user's permissions and send an update message to all their active connections.
     pub async fn update_permissions(&self, state: &AppState, user_id: i64) {
         tracing::info!("Permission update called for user: {}", user_id);
 
-        // Grab the current claims (if the user is connected at all).
-        let existing_claims = {
-            let map = self.inner.read().await;
-            map.get(&user_id).map(|(claims, _)| claims.clone())
-        };
+        let mut write_map = self.inner.write().await;
 
-        if let Some(old_claims) = existing_claims {
+        if let Some((old_claims, connections)) = write_map.get_mut(&user_id) {
             // Build a partial claims object to force a refresh of permissions.
             let partial_claims = PartialClaims {
-                email: old_claims.email,
+                email: old_claims.email.clone(),
                 user_id: Some(user_id),
-                display_name: Some(old_claims.display_name),
+                display_name: Some(old_claims.display_name.clone()),
                 canvas_permissions: None, // this forces re-fetch
                 ..PartialClaims::default()
             };
 
-            // Fetch new claims from DB
             let updated_claims = match get_claims(&state.pool, partial_claims).await {
                 Ok(claims) => claims,
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to get updated claims for user {}: {:?}",
-                        user_id, e
-                    );
+                    tracing::error!("Failed to get updated claims for user {}: {:?}", user_id, e);
                     return;
                 }
             };
-
+            
             // Update the claims in the in-memory map
-            let mut map = self.inner.write().await;
-            if let Some((claims, _count)) = map.get_mut(&user_id) {
-                *claims = updated_claims;
-                tracing::info!("Claims successfully refreshed for user {}", user_id);
+            *old_claims = updated_claims.clone();
+            tracing::info!("Claims successfully refreshed for user {}", user_id);
+
+            // Send the new permission to all active connections
+            for ws in connections.iter() {
+                for (canvas_id, new_permission) in &updated_claims.canvas_permissions {
+                    let message = json!({
+                        "canvasId": canvas_id,
+                        "yourPermission": new_permission,
+                    });
+                    
+                    if let Err(e) = ws.send(Message::Text(message.to_string().into())).await {
+                        tracing::error!("Failed to send permission update to client {}: {}", ws.id, e);
+                    }
+                }
             }
         } else {
             tracing::warn!("Permission update called for non-existent user {}", user_id);
         }
     }
 
-    /// Removes a user's connection reference. If the count reaches zero, the claims are removed.
-    pub async fn remove_connection(&self, user_id: i64) -> bool {
+    /// Removes a user's connection reference. If the connection is the last one for a user, the entry is removed.
+    pub async fn remove_connection(&self, user_id: i64, ws_to_remove: &IdentifiableWebSocket) -> bool {
         let mut map = self.inner.write().await;
         
-        if let Some((_, count)) = map.get_mut(&user_id) {
-            *count -= 1;
+        if let Some((_, connections)) = map.get_mut(&user_id) {
+            // Remove the specific WebSocket connection from the vector.
+            connections.retain(|ws| ws.id != ws_to_remove.id);
             
-            if *count == 0 {
+            if connections.is_empty() {
                 // Last connection closed, remove the entry
                 map.remove(&user_id);
                 tracing::info!("Last connection for user {} closed. Claims removed.", user_id);
-                return true;
+                true
             } else {
-                tracing::debug!("User {} connection closed. Remaining connections: {}", user_id, *count);
-                return false;
+                tracing::debug!("User {} connection closed. Remaining connections: {}", user_id, connections.len());
+                false
             }
         } else {
             // Should not happen, but good for safety
             tracing::warn!("Attempted to remove connection for non-existent user {}", user_id);
-            return false;
+            false
         }
     }
 
@@ -138,5 +138,3 @@ impl SocketClaimsManager {
             })
     }
 }
-
-

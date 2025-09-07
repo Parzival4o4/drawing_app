@@ -1,0 +1,29 @@
+[BackendSync] Incoming plain: 
+{
+    "canvas_id":"440b926c-9573-44b1-9ea9-40d950aceafe",
+    "eventsForCanvas":[
+        {"shape":{"backgroundColor":null,"borderColor":"black","center":{"x":364,"y":273},"id":"1-0","radius":6.4031242374328485},"type":"shapeAdded"},
+        {"redraw":false,"shapeId":"1-0","type":"shapeRemovedWithId"},
+        {"shape":{"backgroundColor":null,"borderColor":"black","center":{"x":364,"y":273},"id":"1-1","radius":14.212670403551895},"type":"shapeAdded"},
+        {"redraw":false,"shapeId":"1-1","type":"shapeRemovedWithId"},
+        {"shape":{"backgroundColor":null,"borderColor":"black","center":{"x":364,"y":273},"id":"1-2","radius":22.80350850198276},"type":"shapeAdded"},
+        {"redraw":false,"shapeId":"1-2","type":"shapeRemovedWithId"},
+        {"shape":{"backgroundColor":null,"borderColor":"black","center":{"x":364,"y":273},"id":"1-3","radius":32.802438933713454},"type":"shapeAdded"},
+        {"redraw":false,"shapeId":"1-3","type":"shapeRemovedWithId"},
+        {"shape":{"backgroundColor":null,"borderColor":"black","center":{"x":364,"y":273},"id":"1-4","radius":43.60045871318328},"type":"shapeAdded"},
+        {"redraw":false,"shapeId":"1-4","type":"shapeRemovedWithId"},
+        {"shape":{"backgroundColor":null,"borderColor":"black","center":{"x":364,"y":273},"id":"1-5","radius":54.405882034941776},"type":"shapeAdded"},
+        {"redraw":false,"shapeId":"1-5","type":"shapeRemovedWithId"},
+        {"shape":{"backgroundColor":null,"borderColor":"black","center":{"x":364,"y":273},"id":"1-6","radius":64.63745044476924},"type":"shapeAdded"},
+        {"redraw":false,"shapeId":"1-6","type":"shapeRemovedWithId"},
+        {"shape":{"backgroundColor":null,"borderColor":"black","center":{"x":364,"y":273},"id":"1-7","radius":64.63745044476924},"type":"shapeAdded"}
+    ]
+}
+
+
+[BackendSync] Incoming plain: 
+{"canvasId":"440b926c-9573-44b1-9ea9-40d950aceafe",
+"eventsForCanvas":[
+    {"type":"shapeAdded","shape":{"id":"1-9","borderColor":"black","backgroundColor":null,"center":{"x":241,"y":362},"radius":128.63125592172378}}
+]
+}

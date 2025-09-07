@@ -85,12 +85,15 @@ pub async fn ws_handler(
 
 async fn handle_websocket(socket: WebSocket, claims: Claims, state: AppState) {
     let user_id = claims.user_id;
-    state.socket_claims_manager.add_connection_and_claims(user_id, claims).await;
-
-    let (mut sender, mut receiver) = socket.split(); // sender is a SplitSink<WebSocket, Message>
+    
+    // Create the IdentifiableWebSocket before adding the connection
+    let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Message>(128);
-
     let id_socket = IdentifiableWebSocket::new(tx);
+
+    // Add the IdentifiableWebSocket to the claims manager
+    state.socket_claims_manager.add_connection_and_claims(user_id, claims, id_socket.clone()).await;
+
     tracing::info!("User {} connected via WebSocket.", user_id);
 
     // Spawn a task to forward messages from the channel to the WebSocket sink
@@ -130,7 +133,8 @@ async fn handle_websocket(socket: WebSocket, claims: Claims, state: AppState) {
             .await;
     }
 
-    state.socket_claims_manager.remove_connection(user_id).await;
+    // Remove the IdentifiableWebSocket from the claims manager
+    state.socket_claims_manager.remove_connection(user_id, &id_socket).await;
 
     tracing::info!("User {}'s WebSocket connection cleanup complete.", user_id);
 }
