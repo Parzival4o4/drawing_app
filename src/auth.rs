@@ -1,3 +1,4 @@
+//! Parts of this code have been adapted from https://github.com/tokio-rs/axum/blob/main/examples/jwt/src/main.rs
 use std::{collections::HashMap, fmt::Display};
 use axum::{
     body::Body,
@@ -20,10 +21,6 @@ use argon2::{
 };
 use sqlx::SqlitePool;
 use crate::{AppState, KEYS};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::time::{sleep, Duration};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // ───── 1. Types and their impls ────────────
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -48,7 +45,6 @@ impl Display for Claims {
     }
 }
 
-// Update the FromRequestParts implementation to return an AuthError instead of a Redirect.
 impl<S> FromRequestParts<S> for Claims
 where
     S: Send + Sync,
@@ -86,7 +82,7 @@ where
             &Validation::default(),
         ).map_err(|_| {
             tracing::debug!("Failed to decode JWT");
-            AuthError::WrongCredentials // Use AuthError here
+            AuthError::WrongCredentials 
         })?;
 
         Ok(token_data.claims)
@@ -107,7 +103,7 @@ impl Keys {
     }
 }
 
-// AuthError is already correctly implemented to return JSON with appropriate status codes.
+
 #[derive(Debug)]
 pub enum AuthError {
     WrongCredentials,
@@ -136,7 +132,6 @@ impl IntoResponse for AuthError {
 }
 
 // ───── 2. Middleware ───────────────────────
-// Update the auth_middleware to return an AuthError on failure.
 pub async fn auth_middleware(
     State(state): State<AppState>,
     req: Request<Body>,
@@ -226,7 +221,7 @@ pub async fn auth_middleware(
             }
             response
         }
-        Err(auth_error) => { // Catch the AuthError directly
+        Err(auth_error) => { 
             tracing::debug!("Unauthenticated request for {:?}, returning unauthorized", req.uri());
             auth_error.into_response()
         }
@@ -234,7 +229,6 @@ pub async fn auth_middleware(
 }
 
 // ───── 3. Utilities ────────────────────────
-// (The utilities section remains mostly the same, as it doesn't contain redirects)
 
 // Password Hashing Helper
 pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
@@ -400,62 +394,4 @@ pub async fn get_cookie_from_claims(claims: Claims) -> Result<String, AuthError>
     );
 
     Ok(cookie)
-}
-
-// -------------- start of the update hash map stuff ------------------------
-type UserId = i64;
-
-#[derive(Clone)]
-pub struct PermissionRefreshList {
-    inner: Arc<RwLock<HashMap<UserId, usize>>>,
-}
-
-impl PermissionRefreshList {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-    pub async fn mark_user_for_refresh(&self, user_id: UserId) {
-        let now = current_timestamp();
-        let mut map = self.inner.write().await;
-        map.insert(user_id, now);
-    }
-    pub async fn consume_refresh_request(&self, user_id: UserId) -> bool {
-        let mut map = self.inner.write().await;
-        if map.remove(&user_id).is_some() {
-            true
-        } else {
-            false
-        }
-    }
-    pub async fn has_pending_refresh(&self, user_id: UserId) -> bool {
-        let map = self.inner.read().await;
-        map.contains_key(&user_id)
-    }
-    pub async fn prune_old_entries(&self, max_age: usize) {
-        let now = current_timestamp();
-        let mut map = self.inner.write().await;
-        map.retain(|_, &mut timestamp| now < timestamp + max_age);
-    }
-}
-
-fn current_timestamp() -> usize {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as usize
-}
-
-pub async fn start_cleanup_task(refresh_list: Arc<PermissionRefreshList>) {
-    let reissue_time: usize = REISSUE_AFTER_SECONDS;
-    let prune_age = reissue_time * 2;
-    let interval = Duration::from_secs(reissue_time as u64);
-
-    loop {
-        sleep(interval).await;
-        tracing::debug!("running refresh List prune");
-        refresh_list.prune_old_entries(prune_age).await;
-        tracing::debug!("done with refresh List prune");
-    }
 }

@@ -1,4 +1,4 @@
-// src/main.rs
+//! Parts of this code have been adapted from https://github.com/tokio-rs/axum/blob/main/examples/jwt/src/main.rs
 use axum::{
     routing::{ get, post}, Router
 };
@@ -6,30 +6,26 @@ use sqlx::sqlite::SqlitePool;
 use sqlx::migrate::Migrator;
 use tower_http::services::{ServeDir, ServeFile};
 use std::{env, net::SocketAddr};
-use std::sync::LazyLock; // Import LazyLock here
+use std::sync::LazyLock; 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use dotenvy::dotenv;
 
-// Import modules
 mod auth;
 mod handlers;
 mod websocket_handlers;
 mod socket_claims_manager;
 mod canvas_manager;
 mod identifiable_web_socket;
+mod permission_refresh_list;
 
 // Re-export types from auth and handlers for main's use
-use auth::{auth_middleware, PermissionRefreshList}; // Only need auth_middleware from auth
+use auth::{auth_middleware }; 
 use handlers::{
     get_user_info, update_profile};
 use std::sync::Arc;
 
 use crate::{
-    auth::start_cleanup_task, 
-    handlers::{create_canvas, get_canvas_list, get_canvas_permissions, login, logout, register, update_canvas_permissions}, 
-    websocket_handlers::{ws_handler},
-    socket_claims_manager::{ SocketClaimsManager},
-    canvas_manager::{CanvasManager}
+    canvas_manager::CanvasManager, handlers::{create_canvas, get_canvas_list, get_canvas_permissions, login, logout, register, update_canvas_permissions}, permission_refresh_list::{start_cleanup_task, PermissionRefreshList}, socket_claims_manager::SocketClaimsManager, websocket_handlers::ws_handler
 };
 
 // ───── 1. Constants / statics ──────────────

@@ -1,0 +1,30 @@
+@startuml
+actor Client
+participant "Middleware" as Middleware
+participant "Handler\nupdate_canvas_permissions" as Handler
+participant "PermissionRefreshList" as RefreshList
+participant "SocketClaimsManager" as SocketClaims
+participant "CanvasManager" as CanvasMgr
+database "Database" as DB
+
+
+Client -> Middleware: POST /api/canvas/{id}/permissions\n{user_id, permission}
+Middleware -> Handler: Request mit Claims
+
+Handler -> Handler: Prüfe acting_user Berechtigungen\nund Ziel-User (kein Owner, nicht self)
+
+alt permission erlaubt
+    alt permission entfernt (payload.permission == "")
+        Handler -> DB: DELETE FROM Canvas_Permissions
+        Handler -> CanvasMgr: unregister_user(canvas_id, user_id)
+    else permission ändern
+        Handler -> DB: UPSERT Canvas_Permissions
+    end
+    Handler -> RefreshList: mark_user_for_refresh(user_id)
+    Handler -> SocketClaims: update_permissions(user_id)
+end
+
+Handler --> Middleware: Response (200 OK / 403 Forbidden)
+Middleware --> Client: Response an Client
+
+@enduml

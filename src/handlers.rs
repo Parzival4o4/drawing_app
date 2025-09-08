@@ -1,4 +1,3 @@
-// src/handlers.rs
 use std::{collections::HashMap, path::PathBuf};
 use tokio::fs; 
 
@@ -21,12 +20,6 @@ use crate::{auth::{
 
 
 
-
-// ====================== 404 handler ======================
-// pub async fn handle_404() -> Response {
-//     (StatusCode::NOT_FOUND, "404 Not Found").into_response()
-// }
-
 // ====================== canvas stuff ======================
 
 // A struct to represent a single canvas item in the response
@@ -38,8 +31,6 @@ pub struct CanvasListResponseItem {
 }
 
 // The handler for the GET /api/canvases/list route
-// This function will automatically have the Claims extractor run by Axum,
-// ensuring the request is authenticated before it reaches this handler.
 pub async fn get_canvas_list(
     State(state): State<AppState>,
     claims: Claims,
@@ -71,7 +62,7 @@ pub async fn get_canvas_list(
     );
 
     let canvas_rows = match sqlx::query(&query_string)
-        .fetch_all(&pool) // Fix: Changed &*pool to &pool. The pool is already a reference.
+        .fetch_all(&pool) 
         .await
     {
         Ok(rows) => rows,
@@ -547,7 +538,7 @@ pub async fn get_canvas_permissions(
 // ====================== User Profile ======================
 
 pub async fn get_user_info(
-    claims: Claims, // The Claims extractor will get this from the request extensions
+    claims: Claims, 
 ) -> impl IntoResponse {
     Json(json!({
         "user_id": claims.user_id,
@@ -567,7 +558,7 @@ pub struct UpdateUserPayload {
 pub async fn update_profile(
     State(state): State<AppState>,
     claims: Claims,
-    Json(payload): Json<UpdateUserPayload>, // Changed to accept a JSON payload
+    Json(payload): Json<UpdateUserPayload>, 
 ) -> impl IntoResponse {
 
     let pool = state.pool;

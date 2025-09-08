@@ -1,4 +1,3 @@
-// src/websocket_connection.rs
 use std::hash::{Hash, Hasher};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -51,11 +50,9 @@ impl IdentifiableWebSocket {
             "notify": message
         });
         
-        // FIX: Now calling the implemented self.send()
         let send_result = self.send(Message::Text(notification.to_string().into())).await;
         
         if let Err(e) = send_result {
-            // Note: If sending fails here, it usually means the receiver side (the WS connection task) has closed.
             tracing::error!("Failed to send notification to client {}: {}", self.id, e);
         }
     }

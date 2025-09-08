@@ -172,8 +172,6 @@ export function createMenu(): PopupMenu {
   function hide(): void {
     overlay.style.display = 'none';
     menu.style.display = 'none';
-    // clear menu items if desired
-    // menu.innerHTML = '';
   }
 
   overlay.addEventListener('click', (e: MouseEvent) => {
@@ -193,7 +191,6 @@ export function createMenu(): PopupMenu {
   return { show, hide, addItem, addItems };
 }
 
-// default export for convenience
 export default {
   createItem: (label: string, onClick: () => void) => new MenuItem(label, onClick),
   createSeparator: () => new MenuSeparator(),

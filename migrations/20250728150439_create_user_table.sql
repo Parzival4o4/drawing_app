@@ -28,7 +28,6 @@ CREATE TABLE Canvas_Permissions (
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
     FOREIGN KEY (canvas_id) REFERENCES Canvas(canvas_id) ON DELETE CASCADE,
 
-    -- Optional: Add a check constraint for valid permission_level characters if you want to enforce it at DB level
     CHECK (permission_level IN ('R', 'W', 'V', 'M', 'O', 'C'))
 );
 

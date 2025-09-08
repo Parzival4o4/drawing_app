@@ -140,7 +140,6 @@ export function renderHome() {
       updateEmail.value = user.email;
       updateDisplay.value = user.display_name;
 
-      // ✅ Display user_id
       const userIdSpan = document.getElementById("user-id")!;
       userIdSpan.textContent = user.user_id;
     } catch (err) {

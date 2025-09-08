@@ -1,0 +1,47 @@
+@startuml
+actor Client
+participant ws_handler
+participant handle_websocket
+participant socket_claims_manager
+participant canvas_manager
+database DB
+
+== Verbindung aufbauen ==
+Client -> ws_handler : HTTP Upgrade /ws\n+ JWT
+ws_handler -> DB : Claims validieren / refreshen
+alt ungültig
+    ws_handler --> Client : 401 Unauthorized
+    destroy ws_handler
+else gültig
+    ws_handler -> handle_websocket : Upgrade Connection
+end
+
+== Verbindung registrieren ==
+handle_websocket -> socket_claims_manager : add_connection_and_claims
+handle_websocket -> Client : WebSocket ready
+
+== Message Loop ==
+loop Eingehende Nachrichten
+    Client -> handle_websocket : Nachricht
+    alt WebSocketEvents
+        handle_websocket -> canvas_manager : handle_event(events)
+    else WebSocketCommand
+        alt registerForCanvas
+            handle_websocket -> canvas_manager : register(...)
+        else unregisterForCanvas
+            handle_websocket -> canvas_manager : unregister(...)
+        else toggleModerated
+            handle_websocket -> canvas_manager : toggle_moderated_state(...)
+        else unknown
+            handle_websocket -> handle_websocket : log warning
+        end
+    else ungültig
+        handle_websocket -> handle_websocket : log parse error
+    end
+end
+
+== Verbindung schließen ==
+Client -> handle_websocket : Close
+handle_websocket -> canvas_manager : unregister all canvases
+handle_websocket -> socket_claims_manager : remove_connection
+@enduml

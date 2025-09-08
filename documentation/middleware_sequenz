@@ -1,0 +1,41 @@
+@startuml
+actor Client
+participant Middleware
+participant permission_refresh_list
+participant ProtectedHandler
+database DB
+
+
+== Anfrage ==
+Client -> Middleware : HTTP Request\n+ Cookie(auth_token)
+
+== Token prüfen ==
+alt kein JWT oder ungültig
+    Middleware --> Client : 401 Unauthorized
+    destroy Middleware
+else gültiges JWT
+    alt exp überschritten
+        Middleware --> Client : 401 Unauthorized
+        destroy Middleware
+    else gültig & nicht abgelaufen
+        == Soft-Refresh prüfen ==
+        Middleware -> permission_refresh_list : has_refresh_request(user_id)?
+        alt reissue_time überschritten OR refresh entry vorhanden
+            Middleware -> DB : Claims neu laden (canvas_permissions)
+            DB --> Middleware : aktualisierte Claims
+            Middleware -> Middleware : neues JWT erzeugen\n(exp bleibt, reissue_time neu)
+        end
+
+        == Handler aufrufen ==
+        Middleware -> ProtectedHandler : Request + Claims
+        ProtectedHandler --> Middleware : Response
+
+        == Response ggf. erweitern ==
+        alt neues JWT erzeugt
+            Middleware -> Client : Response + Set-Cookie(new JWT)
+        else kein Refresh nötig
+            Middleware -> Client : Response
+        end
+    end
+end
+@enduml

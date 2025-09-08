@@ -1,5 +1,4 @@
 
-
 # Einleitung
 
 Diese Dokumentation beschreibt die Architektur einer Multi-User-Zeichen-Webapplikation.
@@ -37,12 +36,6 @@ Enthält alle statischen Dateien, die **nicht kompiliert** werden müssen.
 ---
 
 ### `/src`
-  * `base.css` – globale Styles und Layout-Grundgerüst
-  * `canvas.css` – Styles für die Zeichenfläche
-  * `home.css` – Styles für die Startseite
-  * `login.css` – Styles für die Login-Seite
-  * `register.css` – Styles für die Registrierungsseite
-Enthält den **TypeScript-Quellcode** der Anwendung.
 
 * **main.ts**  
   Einstiegspunkt der App. Initialisiert die Anwendung und bindet das Client-Side-Routing ein.
@@ -187,7 +180,7 @@ JWTs enthalten:
 4. **Response**
    - Falls neues JWT erzeugt → im `Set-Cookie`-Header enthalten
 
-![Middleware Sequenzdiagramm](./diagrams/middleware_squenz.png)
+![Middleware Sequenzdiagramm](./Middleware_sequenz.png)
 
 ---
 
@@ -212,7 +205,7 @@ JWTs enthalten:
   - Deregistrierung aus allen Canvases
   - Entfernung aus `socket_claims_manager`
 
-![WebSocket Sequenzdiagramm](./diagrams/websocket_squenz.png)
+![WebSocket Sequenzdiagramm](./websocket_sequenz.png)
 
 
 ---
@@ -297,7 +290,9 @@ CREATE INDEX idx_canvas_permissions_canvas_id
 In diesem Abschnitt werden komplexere Abläufe der Anwendung anhand von **Sequenzdiagrammen** dargestellt. Sie verdeutlichen, wie einzelne Komponenten zusammenarbeiten und welche Schritte bei zentralen Prozessen ablaufen.
 
 
-![Middleware Sequenzdiagramm](./diagrams/middleware_squenz.png)
+![Canvas komunikation Sequenzdiagramm](./Canvas_sequenz.png)
+
+![Rechte update Sequenzdiagramm](./permission_update_sequenz.png)
 
 
 ---
@@ -360,107 +355,3 @@ Mit `CTRL + C` im Terminal.
 
 Ich habe ChatGPT und Google Gemini für Research, Programmierung und das Erstellen der Dokumentation genutzt.
 Als Ausgangspunkt habe ich den Code aus [https://github.com/tokio-rs/axum/blob/main/examples/jwt/src/main.rs](https://github.com/tokio-rs/axum/blob/main/examples/jwt/src/main.rs) verwendet.
-
-Der Großteil (>90 %) meines Codes wurde durch KI generiert.
-Da typische Chatbots nur schlecht mit komplexen Projekten zurechtkommen, ist meine übliche Vorgehensweise, die Aufgabe in einzelne Funktionen, Komponenten oder Änderungen herunterzubrechen.
-
-
----
-
-# Abweichungen von der Aufgabenstellung
-
-Im Folgenden werden die Stellen beschrieben, an denen die Implementierung von den Vorgaben abweicht, sowie die Gründe dafür.
-
-### 1. Nutzer-IDs
-
-* **Meine Lösung:** Nutzer erhalten fortlaufend inkrementierende IDs (`1, 2, 3, …`).
-* **Abweichung:** In der Aufgabenstellung sollten die IDs auf Basis der E-Mail-Adresse entstehen.
-* **Begründung:**
-
-  1. E-Mail-Adressen können sich ändern, IDs jedoch nicht → IDs müssen stabil bleiben.
-  2. Ein sicheres Hashing-Verfahren benötigt Salt, was die Implementierung unnötig komplex macht.
-  3. Inkrementelle IDs sind deutlich kürzer und effizienter zu handhaben als Hashes.
-
----
-
-### 2. Rechte „CO“
-
-* **Meine Lösung:** Einführung einer zusätzlichen Rechte-Stufe **C (Co-Owner)**.
-* **Abweichung:** Die Aufgabenstellung spezifiziert „CO“ nicht näher.
-* **Begründung:**
-
-  * Vermutlich war „Co-Owner“ gemeint, mit denselben Rechten wie ein Owner (**O**).
-  * Zur Konsistenz mit den anderen einbuchstabigen Rechten wurde die Abkürzung auf **C** reduziert.
-
----
-
-### 3. Aufgaben 5.3 – 5.5
-
-* **Meine Lösung:** Aufgaben 5.3 und 5.4 wurden gemeinsam mit 5.5 umgesetzt.
-* **Abweichung:** Einzelne Umsetzungsschritte wurden nicht separat implementiert.
-* **Begründung:**
-
-  * 5.3 und 5.4 sind nicht sinnvoll umsetzbar, ohne gleichzeitig Funktionalität aus 5.5 einzubauen.
-  * Daher wurden diese drei Teilaufgaben zusammengefasst.
-
----
-
-### 4. JWT-Refresh-Mechanismus
-
-* **Meine Lösung:** Hybrid-Verfahren mit serverseitigem **Refresh-Cache**.
-* **Abweichung:** Die Aufgabenstellung fordert, dass JWTs nach der Ausstellung nicht erneut aus der DB geladen werden.
-* **Begründung:**
-
-  * Ohne Serverzustand lassen sich Berechtigungsänderungen nicht rechtzeitig propagieren.
-  * Reine Ablaufzeiten führen entweder zu langen Verzögerungen (mehrere Minuten) oder sehr kurzen Gültigkeiten (häufiges Neuausstellen).
-  * **Hybrid-Ansatz:**
-
-    * Bei Berechtigungsänderungen wird ein Eintrag in einer serverseitigen HashMap gespeichert.
-    * Bei der nächsten Anfrage prüft der Server die Map und stellt ggf. ein neues JWT aus.
-    * JWTs haben eine Gültigkeitsdauer von **5 Minuten**, wodurch alte Einträge effizient entfernt werden können.
-  * Vorteile: konstante Zugriffszeit, bounded space complexity, zeitnahe Updates.
-
----
-
-### 5. Canvas-IDs
-
-* **Meine Lösung:** Verwendung von UUIDs bei der Erstellung von Canvases.
-* **Abweichung:** Aufgabenstellung macht keine konkrete Vorgabe.
-* **Begründung:**
-
-  * UUIDs sind prinzipiell gegen Brute-Force geschützt.
-  * Da aber ohnehin ein Rechte-System existiert (nur Nutzer mit „R“-Recht können Inhalte sehen), ist der Schutz vor Brute-Forcing in diesem Fall weniger relevant.
-
----
-
-### 6. Canvas-Übersichtsseite
-
-* **Meine Lösung:** Es werden nur Canvases angezeigt, für die der Nutzer explizite Rechte besitzt.
-* **Abweichung:** Laut Aufgabenstellung sollten alle Zeichenflächen sichtbar sein.
-* **Begründung:**
-
-  * Nutzer sollen keine Canvases sehen, auf die sie keinen Zugriff haben.
-  * Die Implementierung war einfach und erhöht die Benutzerfreundlichkeit.
-
----
-
-### 7. Event-Typen im Drawer
-
-* **Meine Lösung:** Übernahme von 7 Event-Typen aus älterem Code.
-* **Abweichung:** Vorgabe waren nur 4 Event-Typen.
-* **Begründung:**
-
-  * Der vorhandene Code ist stabil und funktioniert zuverlässig.
-  * Eine Reduktion hätte keinen Mehrwert gebracht, sondern Effizienz verschlechtert (z. B. durch ineffiziente Z-Order-Operationen).
-
----
-
-### 8. WebSocket-Nutzung
-
-* **Meine Lösung:** WebSockets werden ausschließlich auf der Canvas-Seite genutzt.
-* **Abweichung:** Aufgabenstellung: WebSocket-Verbindung auf allen Seiten.
-* **Begründung:**
-
-  * Nur auf der Canvas-Seite ist Echtzeitkommunikation nötig.
-  * Für Login, Registrierung und Übersicht bieten WebSockets keinen Mehrwert.
-  * Da meine Lösung bis Aufgabe 5.2 nur klassische HTTP-Endpunkte nutzte, hätte eine globale WebSocket-Integration größere Umstrukturierungen erfordert.

@@ -1,0 +1,60 @@
+@startuml
+actor Client
+participant "WebSocket Handler\n(handle_incoming_messages & process_command)" as WSHandler
+participant "CanvasManager" as CanvasMgr
+participant "SocketClaimsManager" as SocketClaims
+database "Database" as DB
+entity "File System\n(canvas history file)" as FS
+
+== Register for Canvas ==
+Client -> WSHandler: send registerForCanvas {canvas_id}
+WSHandler -> CanvasMgr: register(user_id, canvas_id, connection)
+
+CanvasMgr -> SocketClaims: get_permission_level(user_id, canvas_id)
+SocketClaims --> CanvasMgr: permission_level
+
+alt permission granted
+    CanvasMgr -> CanvasMgr: check if CanvasState exists in memory
+    alt canvas not in memory
+        CanvasMgr -> DB: SELECT event_file_path, moderated FROM Canvas WHERE canvas_id=?
+        DB --> CanvasMgr: CanvasDBInfo
+        CanvasMgr -> CanvasMgr: create CanvasState & insert into memory
+    end
+    CanvasMgr -> CanvasMgr: add connection to subscribers
+
+    CanvasMgr -> FS: read canvas history file
+    FS --> CanvasMgr: event history
+
+    CanvasMgr -> Client: send moderation state
+    CanvasMgr -> Client: send event history
+    CanvasMgr -> Client: send user permission
+else permission denied
+    CanvasMgr -> Client: notify "no permission"
+end
+
+== Events for Canvas ==
+Client -> WSHandler: send WebSocketEvents {canvas_id, events_for_canvas}
+WSHandler -> CanvasMgr: handle_event(user_id, events)
+CanvasMgr -> SocketClaims: get_permission_level(user_id, canvas_id)
+SocketClaims --> CanvasMgr: permission_level
+
+alt user allowed to draw
+    CanvasMgr -> FS: append events to canvas history file
+    FS --> CanvasMgr: confirmation
+    CanvasMgr -> CanvasMgr: broadcast event to all subscribers
+    CanvasMgr -> Client: receive broadcasted events (including sender)
+else user not allowed
+    CanvasMgr -> Client: optional error/denied notification
+end
+
+== Unregister from Canvas ==
+Client -> WSHandler: send unregisterForCanvas {canvas_id}
+WSHandler -> CanvasMgr: unregister_connection(canvas_id, conn_id)
+
+CanvasMgr -> CanvasMgr: remove connection from subscribers
+alt no more subscribers
+    CanvasMgr -> CanvasMgr: remove CanvasState from memory
+end
+CanvasMgr -> Client: optional notification (unsubscribed)
+
+@enduml

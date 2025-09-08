@@ -1,5 +1,3 @@
-// 100% chatGPT
-
 interface Node<T> {
     value: T;
     prev: Node<T> | null;

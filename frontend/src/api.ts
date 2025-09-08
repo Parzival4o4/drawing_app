@@ -33,7 +33,7 @@ export async function logout() {
   });
 }
 
-// --- New API calls from home.ts ---
+// --- API calls from home.ts ---
 
 export async function getCanvases() {
   return fetch(`${API_BASE}/canvases/list`);

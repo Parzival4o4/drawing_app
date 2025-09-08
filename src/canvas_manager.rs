@@ -103,7 +103,7 @@ impl CanvasManager {
         file_path: &PathBuf,
         canvas_uuid: &str,
         is_moderated: bool,
-        your_permission: &str,   // ⬅️ NEW: pass user’s permission here
+        your_permission: &str,   
     ) {
         // 1. Send moderation state
         let moderated_msg = json!({
@@ -421,7 +421,7 @@ impl CanvasManager {
                 return;
             }
         }
-        drop(lock_guard); // release lock explicitly
+        drop(lock_guard);
 
         // 5. Broadcast the Original Message
         self.broadcast(canvas_uuid, Message::Text(original_message_text.into()))

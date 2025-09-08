@@ -1,4 +1,3 @@
-// src/pages/drawer/BackendSync.ts
 import type { EventSystem, Canvas } from "./drawer.js";
 
 type Handlers = {
@@ -54,7 +53,6 @@ export class BackendSync {
     this.handlers = handlers;
   }
 
-  // New method to send a command to toggle moderation
   public sendToggleModeratedCommand() {
     if (this.socket.readyState !== WebSocket.OPEN) {
       console.warn("[BackendSync] Tried to send toggle command while socket not open.");

@@ -1,11 +1,9 @@
-// src/handlers.rs
-// Add these imports to your handlers.rs
 use axum::{extract::{ws::{Message, WebSocket}, State, WebSocketUpgrade}, response::IntoResponse};
 use futures::StreamExt;
 use std::collections::HashSet;
 use tokio::sync::mpsc;
 use crate::auth::{get_claims, Claims, PartialClaims};
-use crate::AppState; // Import AppState
+use crate::AppState;
 use serde::{Deserialize, Serialize};
 use crate::identifiable_web_socket::IdentifiableWebSocket;
 use futures::SinkExt; // needed for sender.send(...)
@@ -32,7 +30,7 @@ pub struct WebSocketCommand {
 
 
 
-// // ============================= handlers =============================
+// ============================= handlers =============================
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,

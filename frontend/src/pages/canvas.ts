@@ -1,4 +1,3 @@
-// src/pages/canvas.ts
 import { navigateTo } from "../router.js";
 
 export function renderCanvasPage(canvasId: string, userId: string) {
@@ -6,28 +5,21 @@ export function renderCanvasPage(canvasId: string, userId: string) {
   app.innerHTML = `
     <h2>Canvas</h2>
     <div style="display: flex; gap: 20px;">
-            <div style="flex: 0 0 260px; border-right: 1px solid #ccc; padding-right: 10px;">
+      <div style="flex: 0 0 260px; border-right: 1px solid #ccc; padding-right: 10px;">
         <button id="home-btn" class="nav-btn">🏠 Home</button>
 
-                <h3>Tools</h3>
+        <h3>Tools</h3>
         <div class="tools"></div>
 
-                <h3 style="margin-top: 20px;">Moderation</h3>
-        <div id="moderation-container" style="font-size: 0.9em;">
-                  </div>
+        <h3 style="margin-top: 20px;">Moderation</h3>
+        <div id="moderation-container" style="font-size: 0.9em;"></div>
 
-                <h3 style="margin-top: 20px;">Permissions</h3>
+        <h3 style="margin-top: 20px;">Permissions</h3>
         <div id="permissions-container" style="font-size: 0.9em;"></div>
       </div>
 
-            <div style="flex: 1; padding-left: 10px;">
+      <div style="flex: 1; padding-left: 10px;">
         <canvas id="drawArea" width="1024" height="768" style="border:1px solid #ccc;"></canvas>
-
-                <div style="margin-top: 10px;">
-          <textarea id="textarea" cols="130" rows="10" name="event_log"></textarea>
-          <br/>
-          <button id="button" type="button">Load</button>
-        </div>
       </div>
     </div>
   `;
@@ -43,11 +35,9 @@ export function renderCanvasPage(canvasId: string, userId: string) {
       if (typeof mod.setupDrawer === "function") {
         const canvasElm = document.getElementById("drawArea") as HTMLCanvasElement;
         const toolsElm = document.querySelector(".tools") as HTMLElement;
-        const textAreaElm = document.getElementById("textarea") as HTMLTextAreaElement;
-        const buttonElm = document.getElementById("button") as HTMLButtonElement;
         const moderationElm = document.getElementById("moderation-container") as HTMLElement;
 
-        mod.setupDrawer(canvasElm, toolsElm, textAreaElm, buttonElm, moderationElm, canvasId, userId);
+        mod.setupDrawer(canvasElm, toolsElm,  moderationElm, canvasId, userId);
       }
     })
     .catch((err) => {
